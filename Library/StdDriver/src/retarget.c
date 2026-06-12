@@ -41,6 +41,7 @@ struct __FILE
 #else
 #if !defined(__MICROLIB)
     #if (__OPTIMIZE__ == -O0)
+        // 將下面這行註解掉，避免與 ARM Compiler 6 內建的定義衝突
         __asm(".global __ARM_use_no_argv\n\t" "__ARM_use_no_argv:\n\t");
     #endif /* (__OPTIMIZE__ == -O0) */
 #endif /* !defined(__MICROLIB) */

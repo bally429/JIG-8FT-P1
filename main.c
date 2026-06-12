@@ -1,5 +1,5 @@
 /****************************************************************************
- * @file     JIG-8FT-P1.c
+ * @file     JIG_8FT_P1.c
  * @version  v1.37.1
  * @Date     Fri Jun 12 2026 11:42:40 GMT+0800 (台北標準時間)
  * @brief    NuMicro generated code file
@@ -171,7 +171,7 @@ PF.15:PF.15(Pin:31)
 
 #include "M031Series.h"
 
-void JIG-8FT-P1_init_i2c0(void)
+void JIG_8FT_P1_init_i2c0(void)
 {
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA5MFP_Msk | SYS_GPA_MFPL_PA4MFP_Msk);
     SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA5MFP_I2C0_SCL | SYS_GPA_MFPL_PA4MFP_I2C0_SDA);
@@ -179,14 +179,14 @@ void JIG-8FT-P1_init_i2c0(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_i2c0(void)
+void JIG_8FT_P1_deinit_i2c0(void)
 {
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA5MFP_Msk | SYS_GPA_MFPL_PA4MFP_Msk);
 
     return;
 }
 
-void JIG-8FT-P1_init_i2c1(void)
+void JIG_8FT_P1_init_i2c1(void)
 {
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA7MFP_Msk | SYS_GPA_MFPL_PA6MFP_Msk);
     SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA7MFP_I2C1_SCL | SYS_GPA_MFPL_PA6MFP_I2C1_SDA);
@@ -194,14 +194,14 @@ void JIG-8FT-P1_init_i2c1(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_i2c1(void)
+void JIG_8FT_P1_deinit_i2c1(void)
 {
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA7MFP_Msk | SYS_GPA_MFPL_PA6MFP_Msk);
 
     return;
 }
 
-void JIG-8FT-P1_init_ice(void)
+void JIG_8FT_P1_init_ice(void)
 {
     SYS->GPF_MFPL &= ~(SYS_GPF_MFPL_PF1MFP_Msk | SYS_GPF_MFPL_PF0MFP_Msk);
     SYS->GPF_MFPL |= (SYS_GPF_MFPL_PF1MFP_ICE_CLK | SYS_GPF_MFPL_PF0MFP_ICE_DAT);
@@ -209,14 +209,14 @@ void JIG-8FT-P1_init_ice(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_ice(void)
+void JIG_8FT_P1_deinit_ice(void)
 {
     SYS->GPF_MFPL &= ~(SYS_GPF_MFPL_PF1MFP_Msk | SYS_GPF_MFPL_PF0MFP_Msk);
 
     return;
 }
 
-void JIG-8FT-P1_init_pa(void)
+void JIG_8FT_P1_init_pa(void)
 {
     SYS->GPA_MFPH &= ~(SYS_GPA_MFPH_PA11MFP_Msk | SYS_GPA_MFPH_PA10MFP_Msk | SYS_GPA_MFPH_PA9MFP_Msk | SYS_GPA_MFPH_PA8MFP_Msk);
     SYS->GPA_MFPH |= (SYS_GPA_MFPH_PA11MFP_GPIO | SYS_GPA_MFPH_PA10MFP_GPIO | SYS_GPA_MFPH_PA9MFP_GPIO | SYS_GPA_MFPH_PA8MFP_GPIO);
@@ -226,7 +226,7 @@ void JIG-8FT-P1_init_pa(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_pa(void)
+void JIG_8FT_P1_deinit_pa(void)
 {
     SYS->GPA_MFPH &= ~(SYS_GPA_MFPH_PA11MFP_Msk | SYS_GPA_MFPH_PA10MFP_Msk | SYS_GPA_MFPH_PA9MFP_Msk | SYS_GPA_MFPH_PA8MFP_Msk);
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA1MFP_Msk);
@@ -234,7 +234,7 @@ void JIG-8FT-P1_deinit_pa(void)
     return;
 }
 
-void JIG-8FT-P1_init_pb(void)
+void JIG_8FT_P1_init_pb(void)
 {
     SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB14MFP_Msk | SYS_GPB_MFPH_PB11MFP_Msk | SYS_GPB_MFPH_PB10MFP_Msk | SYS_GPB_MFPH_PB9MFP_Msk | SYS_GPB_MFPH_PB8MFP_Msk);
     SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB14MFP_GPIO | SYS_GPB_MFPH_PB11MFP_GPIO | SYS_GPB_MFPH_PB10MFP_GPIO | SYS_GPB_MFPH_PB9MFP_GPIO | SYS_GPB_MFPH_PB8MFP_GPIO);
@@ -244,7 +244,7 @@ void JIG-8FT-P1_init_pb(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_pb(void)
+void JIG_8FT_P1_deinit_pb(void)
 {
     SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB14MFP_Msk | SYS_GPB_MFPH_PB11MFP_Msk | SYS_GPB_MFPH_PB10MFP_Msk | SYS_GPB_MFPH_PB9MFP_Msk | SYS_GPB_MFPH_PB8MFP_Msk);
     SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB7MFP_Msk | SYS_GPB_MFPL_PB6MFP_Msk | SYS_GPB_MFPL_PB5MFP_Msk | SYS_GPB_MFPL_PB4MFP_Msk);
@@ -252,7 +252,7 @@ void JIG-8FT-P1_deinit_pb(void)
     return;
 }
 
-void JIG-8FT-P1_init_pc(void)
+void JIG_8FT_P1_init_pc(void)
 {
     SYS->GPC_MFPH &= ~(SYS_GPC_MFPH_PC14MFP_Msk);
     SYS->GPC_MFPH |= (SYS_GPC_MFPH_PC14MFP_GPIO);
@@ -262,7 +262,7 @@ void JIG-8FT-P1_init_pc(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_pc(void)
+void JIG_8FT_P1_deinit_pc(void)
 {
     SYS->GPC_MFPH &= ~(SYS_GPC_MFPH_PC14MFP_Msk);
     SYS->GPC_MFPL &= ~(SYS_GPC_MFPL_PC7MFP_Msk | SYS_GPC_MFPL_PC6MFP_Msk | SYS_GPC_MFPL_PC5MFP_Msk | SYS_GPC_MFPL_PC4MFP_Msk | SYS_GPC_MFPL_PC1MFP_Msk | SYS_GPC_MFPL_PC0MFP_Msk);
@@ -270,7 +270,7 @@ void JIG-8FT-P1_deinit_pc(void)
     return;
 }
 
-void JIG-8FT-P1_init_pd(void)
+void JIG_8FT_P1_init_pd(void)
 {
     SYS->GPD_MFPH &= ~(SYS_GPD_MFPH_PD15MFP_Msk);
     SYS->GPD_MFPH |= (SYS_GPD_MFPH_PD15MFP_GPIO);
@@ -280,7 +280,7 @@ void JIG-8FT-P1_init_pd(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_pd(void)
+void JIG_8FT_P1_deinit_pd(void)
 {
     SYS->GPD_MFPH &= ~(SYS_GPD_MFPH_PD15MFP_Msk);
     SYS->GPD_MFPL &= ~(SYS_GPD_MFPL_PD3MFP_Msk | SYS_GPD_MFPL_PD2MFP_Msk | SYS_GPD_MFPL_PD1MFP_Msk | SYS_GPD_MFPL_PD0MFP_Msk);
@@ -288,7 +288,7 @@ void JIG-8FT-P1_deinit_pd(void)
     return;
 }
 
-void JIG-8FT-P1_init_pf(void)
+void JIG_8FT_P1_init_pf(void)
 {
     SYS->GPF_MFPH &= ~(SYS_GPF_MFPH_PF15MFP_Msk | SYS_GPF_MFPH_PF14MFP_Msk);
     SYS->GPF_MFPH |= (SYS_GPF_MFPH_PF15MFP_GPIO | SYS_GPF_MFPH_PF14MFP_GPIO);
@@ -298,7 +298,7 @@ void JIG-8FT-P1_init_pf(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_pf(void)
+void JIG_8FT_P1_deinit_pf(void)
 {
     SYS->GPF_MFPH &= ~(SYS_GPF_MFPH_PF15MFP_Msk | SYS_GPF_MFPH_PF14MFP_Msk);
     SYS->GPF_MFPL &= ~(SYS_GPF_MFPL_PF6MFP_Msk | SYS_GPF_MFPL_PF5MFP_Msk | SYS_GPF_MFPL_PF4MFP_Msk | SYS_GPF_MFPL_PF3MFP_Msk | SYS_GPF_MFPL_PF2MFP_Msk);
@@ -306,7 +306,7 @@ void JIG-8FT-P1_deinit_pf(void)
     return;
 }
 
-void JIG-8FT-P1_init_pwm1(void)
+void JIG_8FT_P1_init_pwm1(void)
 {
     SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB15MFP_Msk);
     SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB15MFP_PWM1_CH0);
@@ -316,7 +316,7 @@ void JIG-8FT-P1_init_pwm1(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_pwm1(void)
+void JIG_8FT_P1_deinit_pwm1(void)
 {
     SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB15MFP_Msk);
     SYS->GPC_MFPL &= ~(SYS_GPC_MFPL_PC3MFP_Msk | SYS_GPC_MFPL_PC2MFP_Msk);
@@ -324,7 +324,7 @@ void JIG-8FT-P1_deinit_pwm1(void)
     return;
 }
 
-void JIG-8FT-P1_init_spi0(void)
+void JIG_8FT_P1_init_spi0(void)
 {
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA3MFP_Msk | SYS_GPA_MFPL_PA2MFP_Msk | SYS_GPA_MFPL_PA0MFP_Msk);
     SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA3MFP_SPI0_SS | SYS_GPA_MFPL_PA2MFP_SPI0_CLK | SYS_GPA_MFPL_PA0MFP_SPI0_MOSI);
@@ -332,14 +332,14 @@ void JIG-8FT-P1_init_spi0(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_spi0(void)
+void JIG_8FT_P1_deinit_spi0(void)
 {
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA3MFP_Msk | SYS_GPA_MFPL_PA2MFP_Msk | SYS_GPA_MFPL_PA0MFP_Msk);
 
     return;
 }
 
-void JIG-8FT-P1_init_uart0(void)
+void JIG_8FT_P1_init_uart0(void)
 {
     SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB13MFP_Msk | SYS_GPB_MFPH_PB12MFP_Msk);
     SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB13MFP_UART0_TXD | SYS_GPB_MFPH_PB12MFP_UART0_RXD);
@@ -347,14 +347,14 @@ void JIG-8FT-P1_init_uart0(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_uart0(void)
+void JIG_8FT_P1_deinit_uart0(void)
 {
     SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB13MFP_Msk | SYS_GPB_MFPH_PB12MFP_Msk);
 
     return;
 }
 
-void JIG-8FT-P1_init_uart1(void)
+void JIG_8FT_P1_init_uart1(void)
 {
     SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB3MFP_Msk | SYS_GPB_MFPL_PB2MFP_Msk);
     SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB3MFP_UART1_TXD | SYS_GPB_MFPL_PB2MFP_UART1_RXD);
@@ -362,14 +362,14 @@ void JIG-8FT-P1_init_uart1(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_uart1(void)
+void JIG_8FT_P1_deinit_uart1(void)
 {
     SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB3MFP_Msk | SYS_GPB_MFPL_PB2MFP_Msk);
 
     return;
 }
 
-void JIG-8FT-P1_init_uart2(void)
+void JIG_8FT_P1_init_uart2(void)
 {
     SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB1MFP_Msk | SYS_GPB_MFPL_PB0MFP_Msk);
     SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB1MFP_UART2_TXD | SYS_GPB_MFPL_PB0MFP_UART2_RXD);
@@ -377,14 +377,14 @@ void JIG-8FT-P1_init_uart2(void)
     return;
 }
 
-void JIG-8FT-P1_deinit_uart2(void)
+void JIG_8FT_P1_deinit_uart2(void)
 {
     SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB1MFP_Msk | SYS_GPB_MFPL_PB0MFP_Msk);
 
     return;
 }
 
-void JIG-8FT-P1_init(void)
+void JIG_8FT_P1_init(void)
 {
     //SYS->GPA_MFPH = 0x00000000UL;
     //SYS->GPA_MFPL = 0x88994404UL;
@@ -397,40 +397,63 @@ void JIG-8FT-P1_init(void)
     //SYS->GPF_MFPH = 0x00000000UL;
     //SYS->GPF_MFPL = 0x000000EEUL;
 
-    JIG-8FT-P1_init_i2c0();
-    JIG-8FT-P1_init_i2c1();
-    JIG-8FT-P1_init_ice();
-    JIG-8FT-P1_init_pa();
-    JIG-8FT-P1_init_pb();
-    JIG-8FT-P1_init_pc();
-    JIG-8FT-P1_init_pd();
-    JIG-8FT-P1_init_pf();
-    JIG-8FT-P1_init_pwm1();
-    JIG-8FT-P1_init_spi0();
-    JIG-8FT-P1_init_uart0();
-    JIG-8FT-P1_init_uart1();
-    JIG-8FT-P1_init_uart2();
+    JIG_8FT_P1_init_i2c0();
+    JIG_8FT_P1_init_i2c1();
+    JIG_8FT_P1_init_ice();
+    JIG_8FT_P1_init_pa();
+    JIG_8FT_P1_init_pb();
+    JIG_8FT_P1_init_pc();
+    JIG_8FT_P1_init_pd();
+    JIG_8FT_P1_init_pf();
+    JIG_8FT_P1_init_pwm1();
+    JIG_8FT_P1_init_spi0();
+    JIG_8FT_P1_init_uart0();
+    JIG_8FT_P1_init_uart1();
+    JIG_8FT_P1_init_uart2();
 
     return;
 }
 
-void JIG-8FT-P1_deinit(void)
+void JIG_8FT_P1_deinit(void)
 {
-    JIG-8FT-P1_deinit_i2c0();
-    JIG-8FT-P1_deinit_i2c1();
-    JIG-8FT-P1_deinit_ice();
-    JIG-8FT-P1_deinit_pa();
-    JIG-8FT-P1_deinit_pb();
-    JIG-8FT-P1_deinit_pc();
-    JIG-8FT-P1_deinit_pd();
-    JIG-8FT-P1_deinit_pf();
-    JIG-8FT-P1_deinit_pwm1();
-    JIG-8FT-P1_deinit_spi0();
-    JIG-8FT-P1_deinit_uart0();
-    JIG-8FT-P1_deinit_uart1();
-    JIG-8FT-P1_deinit_uart2();
+    JIG_8FT_P1_deinit_i2c0();
+    JIG_8FT_P1_deinit_i2c1();
+    JIG_8FT_P1_deinit_ice();
+    JIG_8FT_P1_deinit_pa();
+    JIG_8FT_P1_deinit_pb();
+    JIG_8FT_P1_deinit_pc();
+    JIG_8FT_P1_deinit_pd();
+    JIG_8FT_P1_deinit_pf();
+    JIG_8FT_P1_deinit_pwm1();
+    JIG_8FT_P1_deinit_spi0();
+    JIG_8FT_P1_deinit_uart0();
+    JIG_8FT_P1_deinit_uart1();
+    JIG_8FT_P1_deinit_uart2();
 
     return;
 }
 
+/* 主程式進入點 */
+int main(void)
+{
+    /* 解鎖受保護的暫存器 (新唐 MCU 必做) */
+    SYS_UnlockReg();
+
+    /* 執行系統初始化 (這裡面通常會包含時鐘設定與腳位設定) */
+    // 如果 PinConfigure 有生成類似 SYS_Init() 的函數，請在這裡呼叫它
+    
+    /* 執行你的周邊初始化 (呼叫你剛剛改好的那些函數) */
+    JIG_8FT_P1_init_pa();
+    JIG_8FT_P1_init_pb();
+    // 依需求補上其他 init 函數...
+
+    /* 重新鎖定受保護的暫存器 */
+    SYS_LockReg();
+
+    /* 進入主迴圈 (程式永遠停在這裡面執行) */
+    while(1)
+    {
+        // 這裡是你未來要放步進馬達控制或 WIFIBLE 邏輯的地方
+    }
+}
 /*** (C) COPYRIGHT 2013-2026 Nuvoton Technology Corp. ***/
