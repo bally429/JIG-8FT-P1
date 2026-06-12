@@ -1,0 +1,27 @@
+# Keil 忽略清單
+# 忽略編譯產生的資料夾與檔案
+Listings/
+Objects/
+DebugConfig/
+技術資料/
+Voice chip firmware write tool/
+*.o
+*.d
+*.crf
+*.htm
+*.dep
+*.map
+*.lst
+*.hex
+*.axf
+*.bin
+*.sct
+*.build_log.htm
+*.ncfg
+*.txt
+# 忽略使用者的個人設定檔 (每台電腦不同)
+*.uvoptx
+*.uvguix.*
+
+# 保留專案核心檔案 (這些是必須加入 Git 的)
+# *.c, *.h, *.s, *.uvprojx
