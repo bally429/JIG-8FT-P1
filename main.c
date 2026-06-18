@@ -6,7 +6,7 @@
  * OLED: 3.2inch 256x64 mono white OLED Module (SSD1322)
  * RTC: RV-3028-C7
  * PowerMonitor: INA237 I2C Interface
- * 目前版本：v3.8 (2026/06/18)
+ * 目前版本：v3.9 (2026/06/18)
  * 修改版本List 如下:
  * v1.0 (202606171310)
  * 1.修正蜂鳴器 改為GPIO 替代PWM
@@ -35,6 +35,8 @@
  * v3.8 (202606182130)
  * 1.移除各測試介面進入 while(1) 迴圈前的 Fill_Screen_All(0x00)，利用 Safe_Print_OLED 覆寫特性消除黑屏時間，提升畫面轉場流暢度
  * 2.修改主畫面的進入選單提示文字為實體按鍵顏色 "Yellow button > Menu" 提升直覺性
+ * v3.9 (202606182200)
+ * 1.新增 OLED 灰階字體支援 (g_u8TextBrightness)，實現一、二級滾輪選單的「未選取項目漸層淡化」高階視覺效果
  * ===========================================================================================
  */
 
@@ -48,8 +50,10 @@
 #include "RV3028.h"
 
 // =======================================================
-// [Wiegand / TK2 外部變數引用]
+// [外部變數引用]
 // =======================================================
+extern uint8_t g_u8TextBrightness; // v3.9 新增：引入 OLED.c 定義的亮度變數
+
 extern void vCheckingTimeOut(void);
 extern uint8_t g_u8WiegandNum; 
 QUEUE_U64_REFERENCE(au64WG1, 128);
@@ -74,13 +78,11 @@ extern float getPower_mW(void);
 // =======================================================
 // [全域變數與 Buffer 定義]
 // =======================================================
-// UART0 緩衝區
 #define RX0_BUF_SIZE 128
 volatile uint8_t g_u0_rx_buf[RX0_BUF_SIZE];
 volatile uint16_t g_u0_rx_head = 0;
 volatile uint16_t g_u0_rx_tail = 0;
 
-// UART2 Ring Buffer
 #define UART2_RX_BUF_SIZE 256
 volatile uint8_t g_u2_rx_buf[UART2_RX_BUF_SIZE];
 volatile uint16_t g_u2_rx_head = 0;
@@ -116,28 +118,23 @@ void Show_RTC_Time_Loop(uint32_t exit_btn_bit, const char* hint_text);
 // [PinConfig]
 // =======================================================
 void WIFIBLE_ReaderTest_init(void) {
-    // I2C0 (PA.5 SCL, PA.4 SDA) & I2C1
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA5MFP_Msk | SYS_GPA_MFPL_PA4MFP_Msk); 
     SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA5MFP_I2C0_SCL | SYS_GPA_MFPL_PA4MFP_I2C0_SDA);
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA7MFP_Msk | SYS_GPA_MFPL_PA6MFP_Msk); 
     SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA7MFP_I2C1_SCL | SYS_GPA_MFPL_PA6MFP_I2C1_SDA);
     
-    // ICE
     SYS->GPF_MFPL &= ~(SYS_GPF_MFPL_PF1MFP_Msk | SYS_GPF_MFPL_PF0MFP_Msk); 
     SYS->GPF_MFPL |= (SYS_GPF_MFPL_PF1MFP_ICE_CLK | SYS_GPF_MFPL_PF0MFP_ICE_DAT);
     
-    // GPIO
     SYS->GPA_MFPH &= ~(SYS_GPA_MFPH_PA11MFP_Msk | SYS_GPA_MFPH_PA10MFP_Msk | SYS_GPA_MFPH_PA9MFP_Msk | SYS_GPA_MFPH_PA8MFP_Msk);
     SYS->GPA_MFPH |= (SYS_GPA_MFPH_PA11MFP_GPIO | SYS_GPA_MFPH_PA10MFP_GPIO | SYS_GPA_MFPH_PA9MFP_GPIO | SYS_GPA_MFPH_PA8MFP_GPIO);
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA1MFP_Msk); SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA1MFP_GPIO);
     
-    // PB GPIO
     SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB15MFP_Msk | SYS_GPB_MFPH_PB14MFP_Msk | SYS_GPB_MFPH_PB8MFP_Msk);
     SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB15MFP_GPIO | SYS_GPB_MFPH_PB14MFP_GPIO | SYS_GPB_MFPH_PB8MFP_GPIO);
     SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB7MFP_Msk | SYS_GPB_MFPL_PB6MFP_Msk | SYS_GPB_MFPL_PB5MFP_Msk | SYS_GPB_MFPL_PB4MFP_Msk);
     SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB7MFP_GPIO | SYS_GPB_MFPL_PB6MFP_GPIO | SYS_GPB_MFPL_PB5MFP_GPIO | SYS_GPB_MFPL_PB4MFP_GPIO);
     
-    // PC, PD, PF GPIO
     SYS->GPC_MFPH &= ~(SYS_GPC_MFPH_PC14MFP_Msk); SYS->GPC_MFPH |= (SYS_GPC_MFPH_PC14MFP_GPIO);
     SYS->GPC_MFPL &= ~(SYS_GPC_MFPL_PC7MFP_Msk | SYS_GPC_MFPL_PC6MFP_Msk | SYS_GPC_MFPL_PC1MFP_Msk | SYS_GPC_MFPL_PC0MFP_Msk);
     SYS->GPC_MFPL |= (SYS_GPC_MFPL_PC7MFP_GPIO | SYS_GPC_MFPL_PC6MFP_GPIO | SYS_GPC_MFPL_PC1MFP_GPIO | SYS_GPC_MFPL_PC0MFP_GPIO);
@@ -151,11 +148,9 @@ void WIFIBLE_ReaderTest_init(void) {
     SYS->GPF_MFPL &= ~(SYS_GPF_MFPL_PF6MFP_Msk | SYS_GPF_MFPL_PF5MFP_Msk | SYS_GPF_MFPL_PF4MFP_Msk | SYS_GPF_MFPL_PF3MFP_Msk | SYS_GPF_MFPL_PF2MFP_Msk);
     SYS->GPF_MFPL |= (SYS_GPF_MFPL_PF6MFP_GPIO | SYS_GPF_MFPL_PF5MFP_GPIO | SYS_GPF_MFPL_PF4MFP_GPIO | SYS_GPF_MFPL_PF3MFP_GPIO | SYS_GPF_MFPL_PF2MFP_GPIO);
     
-    // SPI0
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA3MFP_Msk | SYS_GPA_MFPL_PA2MFP_Msk | SYS_GPA_MFPL_PA0MFP_Msk);
     SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA3MFP_SPI0_SS | SYS_GPA_MFPL_PA2MFP_SPI0_CLK | SYS_GPA_MFPL_PA0MFP_SPI0_MOSI);
     
-    // UART0, UART1, UART2
     SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB13MFP_Msk | SYS_GPB_MFPH_PB12MFP_Msk);
     SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB13MFP_UART0_TXD | SYS_GPB_MFPH_PB12MFP_UART0_RXD);
     SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB3MFP_Msk | SYS_GPB_MFPL_PB2MFP_Msk);
@@ -165,16 +160,13 @@ void WIFIBLE_ReaderTest_init(void) {
 }
 
 void Setup_GPIO_Modes(void) {
-    GPIO_SetMode(PB, BIT15, GPIO_MODE_OUTPUT); // Buzzer
+    GPIO_SetMode(PB, BIT15, GPIO_MODE_OUTPUT); 
     PB15 = 0; 
-    
     GPIO_SetMode(PC, BIT1, GPIO_MODE_OUTPUT); GPIO_SetMode(PC, BIT0, GPIO_MODE_OUTPUT); 
     GPIO_SetMode(PD, BIT3, GPIO_MODE_OUTPUT); GPIO_SetMode(PD, BIT15, GPIO_MODE_OUTPUT); 
     GPIO_SetMode(PF, BIT15, GPIO_MODE_OUTPUT); 
-    
     GPIO_SetMode(PB, BIT0, GPIO_MODE_QUASI);
-    GPIO_SetMode(PA, BIT1, GPIO_MODE_QUASI); // RTC_INT Input
-    
+    GPIO_SetMode(PA, BIT1, GPIO_MODE_QUASI); 
     GPIO_SetMode(PD, BIT2, GPIO_MODE_QUASI); GPIO_SetMode(PD, BIT1, GPIO_MODE_QUASI); GPIO_SetMode(PD, BIT0, GPIO_MODE_QUASI); 
     GPIO_SetMode(PA, BIT8, GPIO_MODE_QUASI);
     GPIO_SetMode(PF, BIT6, GPIO_MODE_QUASI); GPIO_SetMode(PF, BIT14, GPIO_MODE_QUASI);
@@ -190,10 +182,7 @@ void Interface_init(void){
     GPIO_SetMode(PB, BIT7, GPIO_MODE_OUTPUT); 
     GPIO_SetMode(PA, BIT11, GPIO_MODE_OUTPUT); 
     GPIO_SetMode(PB, BIT4, GPIO_MODE_OUTPUT); 
-    PB6 = 0;  // m_Relay_YtoD1 關閉
-    PB7 = 0;  // m_Relay_CP 關閉
-    PA11 = 0; // m_Relay_Wiegand 關閉
-    PB4 = 0;  // m_Relay_RS232 關閉
+    PB6 = 0;  PB7 = 0;  PA11 = 0; PB4 = 0;  
 }
 
 // =======================================================
@@ -207,8 +196,8 @@ void SYS_Init(void) {
     
     CLK->AHBCLK |= ((1ul << 0)|(1ul << 1)|(1ul << 2)|(1ul << 3)|(1ul << 5)); 
     CLK_EnableModuleClock(SPI0_MODULE);
-    CLK_EnableModuleClock(I2C0_MODULE); // RTC 用的 I2C0 時鐘
-    CLK_EnableModuleClock(I2C1_MODULE); // PowerMonitor 用的 I2C1 時鐘
+    CLK_EnableModuleClock(I2C0_MODULE); 
+    CLK_EnableModuleClock(I2C1_MODULE); 
     
     CLK_EnableModuleClock(UART0_MODULE); CLK_SetModuleClock(UART0_MODULE, CLK_CLKSEL1_UART0SEL_HIRC, CLK_CLKDIV0_UART0(1));
     CLK_EnableModuleClock(UART1_MODULE); CLK_SetModuleClock(UART1_MODULE, CLK_CLKSEL1_UART1SEL_HIRC, CLK_CLKDIV0_UART1(1));
@@ -223,15 +212,14 @@ void SYS_Init(void) {
     UART0->FIFO = (UART0->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE;
     UART_EnableInt(UART0, UART_INTEN_RDAIEN_Msk);
     
-    UART_Open(UART1, 19200); // TR515 GNET 規範通訊
+    UART_Open(UART1, 19200); 
     UART1->FIFO |= (UART_FIFO_RXRST_Msk | UART_FIFO_TXRST_Msk);
     
-    UART_Open(UART2, 9600); // 預設開啟，進入 UART_Monitor_Test 會重新覆蓋
+    UART_Open(UART2, 9600); 
     UART2->FIFO = (UART2->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE;
     UART_EnableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
     
-    I2C_Open(I2C0, 100000); // 開啟 I2C0 (100kHz)
-    
+    I2C_Open(I2C0, 100000); 
     NVIC_EnableIRQ(UART02_IRQn); 
     SYS_LockReg();
 }
@@ -290,7 +278,6 @@ void UART1_Flush_Rx_Buffer(void) {
 void Delay_us(uint32_t us) { CLK_SysTickDelay(us); }
 void Delay_ms(uint32_t ms) { while (ms >= 100) { TIMER_Delay(TIMER0, 100 * 1000); ms -= 100; } if (ms > 0) TIMER_Delay(TIMER0, ms * 1000); }
 
-// 軟體精準模擬 2.7kHz PWM 發聲 (適用於無源蜂鳴器)
 void Beep(uint32_t ms) { 
     uint32_t half_period_us = 185; 
     uint32_t total_cycles = (ms * 1000) / (half_period_us * 2);
@@ -303,7 +290,7 @@ void Beep(uint32_t ms) {
 }
 
 void Trigger_RedLight_Alarm(void) {
-    PC->DOUT |= BIT7; // 點亮紅燈
+    PC->DOUT |= BIT7; 
     Safe_Print_OLED(16, "COMM ERROR ALARM");
     while(1) { Beep(500); Delay_ms(500); } 
 }
@@ -353,7 +340,6 @@ void Show_RTC_Time_Loop(uint32_t exit_btn_bit, const char* hint_text) {
         Safe_Print_OLED(32, "            %02d:%02d:%02d", current_time.hours, current_time.minutes, current_time.seconds);
         Safe_Print_OLED(48, hint_text);
         
-        // 偵測結束按鍵是否被按下
         if((PF->PIN & exit_btn_bit) == 0) {
             Delay_ms(50);
             if((PF->PIN & exit_btn_bit) == 0) {
@@ -413,14 +399,13 @@ int Execute_TR515_Command_With_Retry(const char *tx_payload) {
 }
 
 // =======================================================
-// [測試介面 1] UART2 監控 (v3.8: 移除清屏以保留過場字眼)
+// [測試介面 1] UART2 監控
 // =======================================================
 void UART_Monitor_Test(uint32_t u32BaudRate) {
     Fill_Screen_All(0x00); 
     UART_DisableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
     Interface_init(); PB4 = 1;               
     
-    // 依據傳入的包率參數動態設定 UART2
     UART_Open(UART2, u32BaudRate);
     UART2->FIFO = (UART2->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE;
     UART_EnableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
@@ -430,7 +415,6 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
     Delay_ms(1500); 
 
     int rx_count = 0; char rx_buf[128]; uint32_t loop_tick = 0; int power_state = 0;
-    // v3.8: 刪除此處的 Fill_Screen_All(0x00); 讓標題與提示文字保留直到資料進來蓋掉
 
     while(1) {
         if ((PA->PIN & BIT8) == 0) {
@@ -487,7 +471,7 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
 }
 
 // =======================================================
-// [測試介面 2] Wiegand 監控測試 (v3.8: 移除清屏以保留過場字眼)
+// [測試介面 2] Wiegand 監控測試
 // =======================================================
 void Wiegand_Monitor_Test(void) {
     Fill_Screen_All(0x00); Interface_init(); PB6 = 1; PA11 = 1; 
@@ -497,7 +481,6 @@ void Wiegand_Monitor_Test(void) {
     QUEUE_CLEAR(au64WG1); 
 
     int rx_count = 0; uint32_t loop_tick = 0; int power_state = 0; 
-    // v3.8: 刪除此處的 Fill_Screen_All(0x00);
 
     while(1) {
         if ((PA->PIN & BIT8) == 0) {
@@ -547,7 +530,7 @@ void Wiegand_Monitor_Test(void) {
 }
 
 // =======================================================
-// [測試介面 3] TK2 監控測試 (v3.8: 移除清屏以保留過場字眼)
+// [測試介面 3] TK2 監控測試
 // =======================================================
 void Decode_TK2_Raw(char* out_str) {
     int start_idx = -1; int out_idx = 0;
@@ -572,7 +555,6 @@ void TK2_Monitor_Test(void) {
     
     int rx_count = 0; uint32_t loop_tick = 0; int power_state = 0;
     uint8_t last_tk2_cnt = 0; uint32_t tk2_idle_tick = 0;
-    // v3.8: 刪除此處的 Fill_Screen_All(0x00);
 
     while(1) {
         if ((PA->PIN & BIT8) == 0) {
@@ -625,7 +607,7 @@ void TK2_Monitor_Test(void) {
 }
 
 // =======================================================
-// Main (V3.8)
+// Main (V3.9 新增全域漸層視覺特效)
 // =======================================================
 int main(void) {
     SYS_Init();
@@ -644,10 +626,8 @@ int main(void) {
     Beep(500); Delay_ms(100); Beep(500);
     Delay_ms(1000);
     
-    // v3.8 修改：提示文字改為實體按鍵顏色 Yellow，並於字串前補足空格置中
     Show_RTC_Time_Loop(BIT5, "     Yellow button > Menu"); 
     
-    // 主選單
     const char *menu_items[] = {
         "RS232 Monitor", 
         "Wiegand",
@@ -655,9 +635,8 @@ int main(void) {
         "What's the time?"
     };
     const int NUM_ITEMS = sizeof(menu_items) / sizeof(menu_items[0]);
-    int current_idx = 1; // 預設 Wiegand
+    int current_idx = 1;
 
-    // 二級選單包率選項
     const char *baud_items[] = {
         "115200, N, 8, 1",
         "9600, N, 8, 1",
@@ -674,14 +653,21 @@ int main(void) {
         int prev_idx = (current_idx - 1 + NUM_ITEMS) % NUM_ITEMS;
         int next_idx = (current_idx + 1) % NUM_ITEMS;
 
+        // 【v3.9 核心魔法】動態控制亮度變數，製造漸層感
+        g_u8TextBrightness = 0x04; // 變暗 (可視喜好調整 0x01~0x08)
         Safe_Print_OLED(16, "  %s", menu_items[prev_idx]); 
+        
+        g_u8TextBrightness = 0x0F; // 中間選中項維持最高亮度
         Safe_Print_OLED(32, "> %s", menu_items[current_idx]);
+        
+        g_u8TextBrightness = 0x04; // 變暗
         Safe_Print_OLED(48, "  %s", menu_items[next_idx]);
+        
+        g_u8TextBrightness = 0x0F; // 畫完後必須恢復預設 0x0F，以免影響其他畫面的文字
 
         int selected = 0;
 
         while(1) {
-            // 下滾
             if((PF->PIN & BIT3) == 0) {
                 Delay_ms(50);
                 if((PF->PIN & BIT3) == 0) {
@@ -690,7 +676,6 @@ int main(void) {
                     break; 
                 }
             }
-            // 上滾
             if((PF->PIN & BIT4) == 0) {
                 Delay_ms(50);
                 if((PF->PIN & BIT4) == 0) {
@@ -699,7 +684,6 @@ int main(void) {
                     break; 
                 }
             }
-            // 確認
             if((PF->PIN & BIT5) == 0) {
                 Delay_ms(50);
                 if((PF->PIN & BIT5) == 0) {
@@ -714,7 +698,7 @@ int main(void) {
             Fill_Screen_All(0x00); 
             
             if (current_idx == 0) {
-                int baud_idx = 1; // 預設指向 9600
+                int baud_idx = 1; 
                 int baud_selected = 0;
                 
                 while(1) {
@@ -724,9 +708,17 @@ int main(void) {
                     int p_baud = (baud_idx - 1 + NUM_BAUDS) % NUM_BAUDS;
                     int n_baud = (baud_idx + 1) % NUM_BAUDS;
                     
+                    // 【v3.9】二級包率選單也套用漸層效果！
+                    g_u8TextBrightness = 0x04;
                     Safe_Print_OLED(16, "  %s", baud_items[p_baud]);
+                    
+                    g_u8TextBrightness = 0x0F;
                     Safe_Print_OLED(32, "> %s", baud_items[baud_idx]);
+                    
+                    g_u8TextBrightness = 0x04;
                     Safe_Print_OLED(48, "  %s", baud_items[n_baud]);
+                    
+                    g_u8TextBrightness = 0x0F; // 恢復亮度
                     
                     while(1) {
                         if((PF->PIN & BIT3) == 0) {
@@ -765,7 +757,6 @@ int main(void) {
                 TK2_Monitor_Test();
             } 
             else if (current_idx == 3) {
-                // 為了與進入畫面的 Yellow 按鍵一致，退出時也提示 Yellow button
                 Show_RTC_Time_Loop(BIT5, "     Yellow button > Back"); 
             }
         }

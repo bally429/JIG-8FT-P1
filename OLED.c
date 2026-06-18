@@ -23,7 +23,8 @@ Anti-glare polarizer.
 
 
 int Fill_Screen_All(uint8_t u8GrayScale);
-
+// [新增] 文字亮度控制變數，預設為最高亮度 0x0F (範圍 0x00 ~ 0x0F)
+uint8_t g_u8TextBrightness = 0x0F;
 
 const unsigned char font_16x32[] = {
     /*
@@ -2390,20 +2391,16 @@ void Send_Font_Byte(unsigned char Data)
     unsigned char i;
     unsigned char temp;
     
-    // 一次處理 2 個像素，迴圈次數減半 (從 8 次降為 4 次)
     for (i = 0; i < 4; i++)
     {
         temp = 0x00;
         
-        // 處理左邊的像素 (bit 7)
-        if (Data & 0x80) temp |= 0xF0; // 0xF0 代表左像素最高亮度(白色)
+        // [修改] 不要再寫死 0xF0 跟 0x0F，改用我們自訂的亮度變數！
+        if (Data & 0x80) temp |= (g_u8TextBrightness << 4); // 左像素
+        if (Data & 0x40) temp |= g_u8TextBrightness;        // 右像素
         
-        // 處理右邊的像素 (bit 6)
-        if (Data & 0x40) temp |= 0x0F; // 0x0F 代表右像素最高亮度(白色)
-        
-        vWriteData(temp); // 送出 1 Byte (包含 2 個像素的灰階資料)
-        
-        Data <<= 2; // 將資料左移 2 位，準備下一次迴圈處理後面的像素
+        vWriteData(temp); 
+        Data <<= 2; 
     }
 }
 

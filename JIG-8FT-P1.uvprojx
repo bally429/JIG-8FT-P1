@@ -17,7 +17,7 @@
         <TargetCommonOption>
           <Device>M032SE3AE</Device>
           <Vendor>Nuvoton</Vendor>
-          <PackID>Nuvoton.NuMicroM0_DFP.1.0.2</PackID>
+          <PackID>Nuvoton.NuMicroM0_DFP.1.0.1</PackID>
           <PackURL>https://github.com/OpenNuvoton/cmsis-packs/raw/master/Nuvoton_DFP/</PackURL>
           <Cpu>IRAM(0x20000000,0x4000) IROM(0x00000000,0x20000) IROM2(0x00100000,0x1000) CPUTYPE("Cortex-M0") CLOCK(12000000)</Cpu>
           <FlashUtilSpec></FlashUtilSpec>
