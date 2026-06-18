@@ -7,7 +7,7 @@
 QUEUE_U64_CREATE(au64WG1,128);
 
 uint8_t g_WG_Mode = 0;
-
+uint8_t g_u8WiegandNum = 0;
 typedef struct
 {
 	uint8_t u1MSB_First:1;	// 1, MSB First
@@ -19,7 +19,7 @@ typedef struct
 	uint8_t u1Done:1;	// Packet done
 
 	// Check when u1Parity is enabled
-	// 1111: Accept all Weigand, auto check with timeout
+	// 1111: Accept all wiegand, auto check with timeout
 
 	uint8_t u1Reserve:1;
 
@@ -81,7 +81,7 @@ uint8_t u8TK2_GetUID(uint8_t *str_out){
 
 
 
-void vWeigandSiganl()
+void vwiegandSiganl()
 {
 
 	wg_prop.u8BitCnt++;
@@ -113,7 +113,7 @@ void GPABGH_IRQHandler(void)
 	
 		m_ua8Data[wg_prop.u8BitCnt/8] |= (0x01 << (wg_prop.u8BitCnt%8));
 		
-		vWeigandSiganl();
+		vwiegandSiganl();
 		
         /* Clear PB.5 interrupt flag */
         GPIO_CLR_INT_FLAG(PB, BIT5);
@@ -219,7 +219,7 @@ void GPABGH_IRQHandler(void)
     {
 		m_ua8Data[wg_prop.u8BitCnt/8] &= (~(0x01 << (wg_prop.u8BitCnt%8)));
 		
-		vWeigandSiganl();
+		vwiegandSiganl();
 		
         /* Clear PA.8 interrupt flag */
         GPIO_CLR_INT_FLAG(PA, BIT10);
@@ -273,7 +273,7 @@ void GPCDEF_IRQHandler(void)
  * Code
  ******************************************************************************/
 
-void vWeigand_N(uint8_t u8N){
+void vwiegand_N(uint8_t u8N){
 	int i;
 
 	wg_prop.u1Even  = 0;
@@ -323,7 +323,7 @@ void vWeigand_N(uint8_t u8N){
 	}
 }
 
-void vWeigand37()
+void vwiegand37()
 {
 	int i;
 
@@ -366,7 +366,7 @@ void vWeigand37()
 	}
 }
 
-void vWeigand35()
+void vwiegand35()
 {
 	int i, Ignore = 4;
 
@@ -445,20 +445,20 @@ void vWeigand35()
 			QUEUE_PUT(au64WG1, wg_prop.u64Data);
 	}
 }
-uint8_t g_u8WeigandNum = 0;
-void vGetWeigandData(uint8_t u8Bits)
+uint8_t g_u8wiegandNum = 0;
+void vGetwiegandData(uint8_t u8Bits)
 {
-	g_u8WeigandNum = u8Bits;
+	g_u8wiegandNum = u8Bits;
 	
 	if(u8Bits == 35){
 
-		vWeigand35();
+		vwiegand35();
 	}
 	else if(u8Bits == 37){
-		vWeigand37();
+		vwiegand37();
 	}
 	else{
-		vWeigand_N(u8Bits);
+		vwiegand_N(u8Bits);
 	}
 
 }
@@ -489,14 +489,14 @@ void vCheckingTimeOut()
 	{
 //		if(SE100.u4WGSelect == WG_AUTO){
 
-			vGetWeigandData(wg_prop.u8BitCnt);
+			vGetwiegandData(wg_prop.u8BitCnt);
 //		}
 
 		wg_prop.u8BitCnt= 0;
 	}
 }
 
-void vWeigand_SensorInit()
+void vwiegand_SensorInit()
 {
 	
 

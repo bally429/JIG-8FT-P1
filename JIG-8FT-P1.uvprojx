@@ -135,11 +135,11 @@
             <RunIndependent>0</RunIndependent>
             <UpdateFlashBeforeDebugging>1</UpdateFlashBeforeDebugging>
             <Capability>1</Capability>
-            <DriverSelection>-1</DriverSelection>
+            <DriverSelection>4096</DriverSelection>
           </Flash1>
           <bUseTDR>1</bUseTDR>
           <Flash2>BIN\UL2CM3.DLL</Flash2>
-          <Flash3></Flash3>
+          <Flash3>"" ()</Flash3>
           <Flash4></Flash4>
           <pFcarmOut></pFcarmOut>
           <pFcarmGrp></pFcarmGrp>
@@ -529,6 +529,26 @@
               <FileName>main.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\main.c</FilePath>
+            </File>
+            <File>
+              <FileName>INA237.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\INA237.c</FilePath>
+            </File>
+            <File>
+              <FileName>OLED.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\OLED.c</FilePath>
+            </File>
+            <File>
+              <FileName>RV3028.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\RV3028.c</FilePath>
+            </File>
+            <File>
+              <FileName>Wiegand_TK2.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\Wiegand_TK2.c</FilePath>
             </File>
           </Files>
         </Group>

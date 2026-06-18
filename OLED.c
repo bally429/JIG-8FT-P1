@@ -1,13 +1,18 @@
 /*
-* Author: Ken Chen, 2019/2/18 
-* 
-* File Name: OLED.c
-*
-* Version: 0.1.0 
-* 
-* Description: OLED(SSD1322) Driver for Nuvoton Chip(Model Name - Nuc120).
-*              LCD size is 256(w) * 64(h) pixel 
-* Copyright(c) 2019 Gigatms Technology Corp. All rights reserved.    
+FEATURES
+P/N: LCD-T0060_T
+Small molecular organic light emitting diode.
+Color : White.
+Panel matrix : 256x64.
+Driver IC : SSD1322.
+Excellent Quick response time : 10us.
+Extremely thin thickness for best mechanism design : 2.01mm.
+High contrast : 2000:1.
+Wide viewing angle : 1609.
+8-bit 6800/8080-series parallel interface, 3/4-wire Serial Peripheral
+Interface.
+Wide range of operating temperature : -40 to 70 C.
+Anti-glare polarizer.
 */
 
 #include "OLED.h"
@@ -381,189 +386,6 @@ const unsigned char font_16x32[] = {
     0x00,0x00,  /* 0000000000000000 */
     0x00,0x00   /* 0000000000000000 */
 };
-
-// const unsigned char font_8x16[] = {
-
-//     /* 0 - 修改後四周留空 */
-//     0xff,  /* 00000000 - 頂部空白行 */
-//     0x3C,  /* 00111100 */
-//     0x7E,  /* 01111110 */
-//     0x66,  /* 01100110 - 左右各去掉1像素 */
-//     0xC3,  /* 11000011 */
-//     0xC3,  /* 11000011 */
-//     0xC3,  /* 11000011 */
-//     0xC3,  /* 11000011 */
-//     0xC3,  /* 11000011 */
-//     0xC3,  /* 11000011 */
-//     0xC3,  /* 11000011 */
-//     0x66,  /* 01100110 - 左右各去掉1像素 */
-//     0x7E,  /* 01111110 */
-//     0x3C,  /* 00111100 */
-//     0x00,  /* 00000000 - 底部空白行 */
-//     0x00,  /* 00000000 - 額外間距 */
-
-//     /* 1 - 修改後四周留空 */
-//     0xff,  /* 00000000 */
-//     0x18,  /* 00011000 */
-//     0x38,  /* 00111000 */
-//     0x18,  /* 00011000 - 左右縮進 */
-//     0x18,  /* 00011000 */
-//     0x18,  /* 00011000 */
-//     0x18,  /* 00011000 */
-//     0x18,  /* 00011000 */
-//     0x18,  /* 00011000 */
-//     0x18,  /* 00011000 */
-//     0x18,  /* 00011000 */
-//     0x18,  /* 00011000 - 左右縮進 */
-//     0x3C,  /* 00111100 */
-//     0x00,  /* 00000000 */
-//     0x00,  /* 00000000 */
-//     0x00,  /* 00000000 */
-
-//     /* 2 - 修改後四周留空 */
-//     0xff,  /* 00000000 */
-//     0x3C,  /* 00111100 */
-//     0x7E,  /* 01111110 */
-//     0x42,  /* 01000010 - 左右縮進 */
-//     0x02,  /* 00000010 */
-//     0x06,  /* 00000110 */
-//     0x0C,  /* 00001100 */
-//     0x18,  /* 00011000 */
-//     0x30,  /* 00110000 */
-//     0x60,  /* 01100000 */
-//     0x40,  /* 01000000 */
-//     0x42,  /* 01000010 - 左右縮進 */
-//     0x7E,  /* 01111110 */
-//     0x3C,  /* 00111100 */
-//     0x00,  /* 00000000 */
-//     0x00,  /* 00000000 */
-
-//     /* 3 - 修改後四周留空 */
-//     0x00,  /* 00000000 */
-//     0x3C,  /* 00111100 */
-//     0x7E,  /* 01111110 */
-//     0x42,  /* 01000010 - 左右縮進 */
-//     0x02,  /* 00000010 */
-//     0x06,  /* 00000110 */
-//     0x1C,  /* 00011100 */
-//     0x06,  /* 00000110 */
-//     0x02,  /* 00000010 */
-//     0x02,  /* 00000010 */
-//     0x42,  /* 01000010 */
-//     0x66,  /* 01100110 - 左右縮進 */
-//     0x7E,  /* 01111110 */
-//     0x3C,  /* 00111100 */
-//     0x00,  /* 00000000 */
-//     0x00,  /* 00000000 */
-
-//     /* 4 - 修改後四周留空 */
-//     0x00,  /* 00000000 */
-//     0x04,  /* 00000100 */
-//     0x0C,  /* 00001100 */
-//     0x14,  /* 00010100 - 左右縮進 */
-//     0x24,  /* 00100100 */
-//     0x44,  /* 01000100 */
-//     0x84,  /* 10000100 */
-//     0xFE,  /* 11111110 */
-//     0x04,  /* 00000100 */
-//     0x04,  /* 00000100 */
-//     0x04,  /* 00000100 */
-//     0x04,  /* 00000100 - 左右縮進 */
-//     0x0E,  /* 00001110 */
-//     0x00,  /* 00000000 */
-//     0x00,  /* 00000000 */
-//     0x00,  /* 00000000 */
-
-//     /* 5 - 修改後四周留空 */
-//     0x00,  /* 00000000 */
-//     0x7E,  /* 01111110 */
-//     0x7E,  /* 01111110 */
-//     0x40,  /* 01000000 - 左右縮進 */
-//     0x40,  /* 01000000 */
-//     0x7C,  /* 01111100 */
-//     0x7E,  /* 01111110 */
-//     0x02,  /* 00000010 */
-//     0x02,  /* 00000010 */
-//     0x02,  /* 00000010 */
-//     0x42,  /* 01000010 */
-//     0x66,  /* 01100110 - 左右縮進 */
-//     0x7E,  /* 01111110 */
-//     0x3C,  /* 00111100 */
-//     0x00,  /* 00000000 */
-//     0x00,  /* 00000000 */
-
-//     /* 6 - 修改後四周留空 */
-//     0x00,  /* 00000000 */
-//     0x1C,  /* 00011100 */
-//     0x3E,  /* 00111110 */
-//     0x62,  /* 01100010 - 左右縮進 */
-//     0x40,  /* 01000000 */
-//     0x7C,  /* 01111100 */
-//     0x7E,  /* 01111110 */
-//     0x42,  /* 01000010 */
-//     0x42,  /* 01000010 */
-//     0x42,  /* 01000010 */
-//     0x42,  /* 01000010 */
-//     0x66,  /* 01100110 - 左右縮進 */
-//     0x7E,  /* 01111110 */
-//     0x3C,  /* 00111100 */
-//     0x00,  /* 00000000 */
-//     0x00,  /* 00000000 */
-
-//     /* 7 - 修改後四周留空 */
-//     0x00,  /* 00000000 */
-//     0x7E,  /* 01111110 */
-//     0x7E,  /* 01111110 */
-//     0x42,  /* 01000010 - 左右縮進 */
-//     0x04,  /* 00000100 */
-//     0x04,  /* 00000100 */
-//     0x08,  /* 00001000 */
-//     0x08,  /* 00001000 */
-//     0x10,  /* 00010000 */
-//     0x10,  /* 00010000 */
-//     0x10,  /* 00010000 */
-//     0x10,  /* 00010000 - 左右縮進 */
-//     0x10,  /* 00010000 */
-//     0x00,  /* 00000000 */
-//     0x00,  /* 00000000 */
-//     0x00,  /* 00000000 */
-
-//     /* 8 - 修改後四周留空 */
-//     0x00,  /* 00000000 */
-//     0x3C,  /* 00111100 */
-//     0x7E,  /* 01111110 */
-//     0x66,  /* 01100110 - 左右縮進 */
-//     0x42,  /* 01000010 */
-//     0x66,  /* 01100110 */
-//     0x3C,  /* 00111100 */
-//     0x3C,  /* 00111100 */
-//     0x66,  /* 01100110 */
-//     0x42,  /* 01000010 */
-//     0x42,  /* 01000010 */
-//     0x66,  /* 01100110 - 左右縮進 */
-//     0x7E,  /* 01111110 */
-//     0x3C,  /* 00111100 */
-//     0x00,  /* 00000000 */
-//     0x00,  /* 00000000 */
-
-//     /* 9 - 修改後四周留空 */
-//     0x00,  /* 00000000 */
-//     0x3C,  /* 00111100 */
-//     0x7E,  /* 01111110 */
-//     0x66,  /* 01100110 - 左右縮進 */
-//     0x42,  /* 01000010 */
-//     0x42,  /* 01000010 */
-//     0x42,  /* 01000010 */
-//     0x66,  /* 01100110 */
-//     0x7E,  /* 01111110 */
-//     0x3E,  /* 00111110 */
-//     0x02,  /* 00000010 */
-//     0x06,  /* 00000110 - 左右縮進 */
-//     0x7C,  /* 01111100 */
-//     0x38,  /* 00111000 */
-//     0x00,  /* 00000000 */
-//     0x00   /* 00000000 */
-// };
 
 //*******************
 const unsigned char font_8x16[] = {
@@ -2561,33 +2383,29 @@ void vOLED_INIT()
 	vWriteData(0x20);
 	vWriteCommand(0xAF);   //display on
 	Fill_Screen_All(0);
-	// Fill_Screen_All(0xff);
 }
 
-/* 輔助函式：將1個byte的字型資料(8 pixels) 轉換為 OLED 格式並發送 */
-/* SSD1322 一個像素 4 bits，所以 8 個像素需要 4 個 bytes 發送 */
-static void Send_Font_Byte(uint8_t font_data)
+void Send_Font_Byte(unsigned char Data)
 {
-    uint8_t bit_mask = 0x80;
-    uint8_t out_data;
-    int k;
+    unsigned char i;
+    unsigned char temp;
     
-    // 每次處理兩個 bit (兩個像素)，組成一個 byte (0xF0, 0x0F, 0xFF, 0x00)
-    for(k = 0; k < 4; k++) 
+    // 一次處理 2 個像素，迴圈次數減半 (從 8 次降為 4 次)
+    for (i = 0; i < 4; i++)
     {
-        out_data = 0x00;
-        // 左邊像素 (高4位)
-        if (font_data & bit_mask) out_data |= 0xF0;
-        bit_mask >>= 1;
+        temp = 0x00;
         
-        // 右邊像素 (低4位)
-        if (font_data & bit_mask) out_data |= 0x0F;
-        bit_mask >>= 1;
+        // 處理左邊的像素 (bit 7)
+        if (Data & 0x80) temp |= 0xF0; // 0xF0 代表左像素最高亮度(白色)
         
-        vWriteData(out_data);
+        // 處理右邊的像素 (bit 6)
+        if (Data & 0x40) temp |= 0x0F; // 0x0F 代表右像素最高亮度(白色)
+        
+        vWriteData(temp); // 送出 1 Byte (包含 2 個像素的灰階資料)
+        
+        Data <<= 2; // 將資料左移 2 位，準備下一次迴圈處理後面的像素
     }
 }
-
 
 void vPrintLogNumber(char *str,...)
 {
@@ -2660,26 +2478,29 @@ void vPrintLogNumber2(char *str,...)
 
 int Fill_Screen_All(uint8_t u8GrayScale)
 {
-	int i,j;
-	vWriteCommand(0x15);   // set column address
-	vWriteData(0x1C);
-	vWriteData(0x1C + 63); // 設定整個螢幕寬度
-	
-	vWriteCommand(0x75);   // set raw address
-	vWriteData(0x00);
-	vWriteData(0x3f);
-	vWriteCommand(0x5c);   // write ram command
-	
-    /*展開迴圈以減少迴圈判斷次數，提升清屏速度 */
-    // 總共需要寫入 128(行) * 64(byte/行) = 8192 bytes
+    int i;
+    
+    // 1. 設定全螢幕的繪圖視窗範圍 (Window Addressing)
+    // SSD1322 的 Column 一個地址包含 4 個像素 (2 Bytes)
+    vWriteCommand(0x15);   // Set Column Address
+    vWriteData(0x1C);      // Start Column (28)
+    vWriteData(0x5B);      // End Column (91) -> 總共 64 個 Column (256像素)
+    
+    vWriteCommand(0x75);   // Set Row Address
+    vWriteData(0x00);      // Start Row (0)
+    vWriteData(0x3F);      // End Row (63) -> 總共 64 行
+    
+    vWriteCommand(0x5C);   // Enable Write RAM
+    
+    // 2. 進入純資料模式，連續寫入 8192 Bytes (256x64像素 / 2像素每Byte)
+    // 直接保留 u8GrayScale 參數，支援未來的灰階顯示需求！
     for(i = 0; i < 8192; i++) 
     {
         vWriteData(u8GrayScale);
     }
-	
-	return 0;
+    
+    return 0;
 }
-
 
 // =========================================================================
 // [終極升級版] 小字體 8x16 (支援滿版 32 字元，絕對防溢位當機)
@@ -2772,102 +2593,4 @@ void vPrintAsciiRaw2(int rawStr, int column16, char *strLeft, char *strRight)//G
         }       
     }       
 }
-
-
-//*******小字體8x16[]
-//void vPrintAsciiRaw(int rawStr,char *str,...)
-//{
-//	uint8_t i,j;
-//	char word[80] = {0,};
-//	
-//	va_list argptr;
-//	va_start(argptr, str);
-//	vsprintf(word, str, argptr);
-//	va_end(argptr);
-//	
-//	for(i = 0; i < 32; i++) // 假設最多顯示32個字
-//	{
-//		// if(word[i] == 0) return;
-//		if(word[i] == 0) word[i] = ' ';
-//		
-//		vWriteCommand(0x15);   // set column address
-//		vWriteData(0x1c+i*2 );
-//		vWriteData(0x1c +i*2+1);
-//		vWriteCommand(0x75);   // set raw address
-//		vWriteData(00+rawStr);
-//		vWriteData(0xff);
-//		vWriteCommand(0x5c);   // write ram command
-//		
-//		for(j = 0; j < 16; j+=1)
-//		{
-//            /* 使用輔助函式直接轉換並發送 */
-//            // font_8x16 陣列是單字節寬度，所以直接送入轉換即可
-//            Send_Font_Byte(font_8x16[((word[i] - 0x20) * 16) + j]);
-//		}
-//	}
-//}
-
-////*******小字體8x16[] 螢幕分一半顯示
-//void vPrintAsciiRaw2(int rawStr,int column16,char *str,char *str2,...)
-//{
-//	uint8_t i,j;
-//    /* 變數移入區域範圍 (Stack)，函式結束後自動釋放，且避免全域污染 */
-//    char word[80] = {0,};
-//	char word2[80] = {0,};	
-//	
-//	va_list argptr;
-//	va_list argptr2;
-//						 
-//	va_start(argptr, str);
-//	vsprintf(word, str, argptr);
-//	va_end(argptr);
-//	
-//    va_start(argptr2, str2); 
-//    vsprintf(word2, str2, argptr2);
-//    va_end(argptr2);
-
-//    // 處理第一行文字
-//    for(i = 0; i < 16; i++)
-//    {
-//        if(word[i] == 0) word[i] = ' ';
-//        
-//        vWriteCommand(0x15);   // set column address
-//        vWriteData(0x1c+i*2 );
-//        vWriteData(0x1c+i*2+1);
-//        vWriteCommand(0x75);   // set raw address
-//        vWriteData(00+rawStr);
-//        vWriteData(0xff);
-//        vWriteCommand(0x5c);   // write ram command
-//        
-//        for(j = 0; j < 16; j+=1)
-//        {
-//            /* 使用 Send_Font_Byte */
-//            Send_Font_Byte(font_8x16[((word[i] - 0x20) * 16) + j]);
-//        }
-//    }
-
-//    // 處理第二行文字 (如果 column16 符合條件)
-//    // [註解] column16 == 0x20 應該是為了控制是否顯示右半邊，或是偏移量
-//    if (column16 == 0x20)
-//    {
-//        for(i = 0; i < 16; i++)
-//        {
-//            if(word2[i] == 0) word2[i] = ' ';
-//            
-//            vWriteCommand(0x15);   // set column address
-//            vWriteData(0x1c+column16+i*2 ); // 加上偏移量
-//            vWriteData(0x1c+column16+i*2+1);
-//            vWriteCommand(0x75);   // set raw address
-//            vWriteData(00+rawStr);
-//            vWriteData(0xff);
-//            vWriteCommand(0x5c);   // write ram command
-//            
-//            for(j = 0; j < 16; j+=1)
-//            {
-//                 /* 使用 Send_Font_Byte */
-//                 Send_Font_Byte(font_8x16[((word2[i] - 0x20) * 16) + j]);
-//            }
-//        }		
-//    }		
-//}
 
