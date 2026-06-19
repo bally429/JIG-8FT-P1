@@ -73,5 +73,10 @@ extern const unsigned char Block_Empty[];
 extern const unsigned char Item_Coin[];
 extern const unsigned char Item_Mushroom[];
 extern const unsigned char  Mario_Clear[];
+
+// [v4.3 新增] Frame Buffer 顯存控制函數
+void OLED_Clear(void);
+void OLED_Update(void);
+void OLED_PrintString(int x, int y, int min_y, int max_y, const char *str, uint8_t brightness);
 /* --------------------------- */
 #endif

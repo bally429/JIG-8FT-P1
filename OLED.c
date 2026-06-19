@@ -26,6 +26,10 @@ int Fill_Screen_All(uint8_t u8GrayScale);
 // [新增] 文字亮度控制變數，預設為最高亮度 0x0F (範圍 0x00 ~ 0x0F)
 uint8_t g_u8TextBrightness = 0x0F;
 
+// [v4.1 新增] 高階 UI 繪圖庫支援
+void OLED_Clear_Area(uint8_t start_row, uint8_t end_row);
+void vPrintAsciiRaw_Clipped(int y, int min_y, int max_y, uint8_t brightness, char *strLeft, char *strRight);
+
 const unsigned char font_16x32[] = {
     /*
      * code=48, hex=0x30, ascii="0"
@@ -2291,31 +2295,94 @@ const unsigned char font_8x16[] = {
     0x00, /* 00000000 */ 
 };
 
-// #define DELAY__ 	{int i = 20; while(i>0) i--;}
-#define WAIT_SPI_IDLE(spi)  while(SPI_IS_BUSY(spi))
 
-void vWriteData(uint8_t u8Data)
-{
-
-/* [優化後] 使用硬體旗標檢查，提升速度並確保數據發送完畢 */
-    WAIT_SPI_IDLE(SPI0); // 確保上筆資料傳完
-    OLED_DATAMODE;       // 切換為 Data 模式
-    SPI_WRITE_TX(SPI0, u8Data);
-    WAIT_SPI_IDLE(SPI0); // 等待寫入緩衝完成 (視需求可省略這行，讓下一筆資料的開頭去等)
-}
-
-
-void vWriteCommand(uint8_t u8Command)
-{
-
-/* [優化後] */
-    WAIT_SPI_IDLE(SPI0);
-    OLED_COMMAND_MODE;   // 切換為 Command 模式
-    SPI_WRITE_TX(SPI0, u8Command);
-    WAIT_SPI_IDLE(SPI0);
-}
 
 #define SPI_CLK_FREQ    2000000
+
+// 修改後：
+#define WAIT_SPI_IDLE(spi)  while(SPI_IS_BUSY(spi)) {}
+
+// =========================================================================
+// [v4.3 真? Frame Buffer 顯示引擎]
+// =========================================================================
+
+// 宣告 8KB 的全域顯存 (64行 x 128 Byte，每 Byte 存 2 個 4-bit 像素)
+uint8_t OLED_GRAM[64][128]; 
+
+void vWriteData(uint8_t u8Data) {
+    WAIT_SPI_IDLE(SPI0); OLED_DATAMODE; SPI_WRITE_TX(SPI0, u8Data); WAIT_SPI_IDLE(SPI0);
+}
+void vWriteCommand(uint8_t u8Command) {
+    WAIT_SPI_IDLE(SPI0); OLED_COMMAND_MODE; SPI_WRITE_TX(SPI0, u8Command); WAIT_SPI_IDLE(SPI0);
+}
+
+// 1. 瞬間清空顯存 (光速級)
+void OLED_Clear(void) {
+    memset(OLED_GRAM, 0x00, sizeof(OLED_GRAM));
+}
+
+// 2. 核心畫點函數 (帶硬體邊界保護)
+void OLED_DrawPixel(int x, int y, uint8_t color) {
+    if(x < 0 || x > 255 || y < 0 || y > 63) return; // 保護：絕對不畫出界
+    
+    // SSD1322 一個 Byte 裝兩個像素 (高 4 bit 為偶數 X，低 4 bit 為奇數 X)
+    if(x % 2 == 0) OLED_GRAM[y][x/2] = (OLED_GRAM[y][x/2] & 0x0F) | (color << 4);
+    else           OLED_GRAM[y][x/2] = (OLED_GRAM[y][x/2] & 0xF0) | (color & 0x0F);
+}
+
+extern const unsigned char font_8x16[]; 
+
+// 3. 帶上下邊界裁切的字元繪製
+void OLED_DrawChar(int x, int y, int min_y, int max_y, char c, uint8_t brightness) {
+    if(c < 0x20 || c > 0x7E) return;
+    const unsigned char *glyph = &font_8x16[(c - 0x20) * 16];
+    
+    for(int r = 0; r < 16; r++) {
+        int draw_y = y + r;
+        if (draw_y < min_y || draw_y > max_y) continue; // 軟體裁切：完美實現文字滑入/滑出特效
+        
+        uint8_t line = glyph[r];
+        for(int col = 0; col < 8; col++) {
+            if(line & (0x80 >> col)) OLED_DrawPixel(x + col, draw_y, brightness);
+            else OLED_DrawPixel(x + col, draw_y, 0x00); // 覆蓋背景防破圖
+        }
+    }
+}
+
+// 4. 字串繪製引擎
+void OLED_PrintString(int x, int y, int min_y, int max_y, const char *str, uint8_t brightness) {
+    int curr_x = x;
+    while(*str) {
+        OLED_DrawChar(curr_x, y, min_y, max_y, *str, brightness);
+        curr_x += 8;
+        str++;
+    }
+}
+
+// 5. 將 8KB 顯存一波流轟炸到 OLED (極速不閃屏)
+void OLED_Update(void) {
+    vWriteCommand(0x15); vWriteData(0x1C); vWriteData(0x5B); // 全寬度
+    vWriteCommand(0x75); vWriteData(0x00); vWriteData(0x3F); // 全高度
+    vWriteCommand(0x5C); // 開啟寫入
+    
+    OLED_DATAMODE;
+    for(int r = 0; r < 64; r++) {
+        for(int c = 0; c < 128; c++) {
+            WAIT_SPI_IDLE(SPI0); 
+            SPI_WRITE_TX(SPI0, OLED_GRAM[r][c]); // 直接塞進硬體 FIFO
+        }
+    }
+    WAIT_SPI_IDLE(SPI0);
+}
+
+// 保留相容性
+int Fill_Screen_All(uint8_t u8GrayScale) {
+    memset(OLED_GRAM, u8GrayScale, sizeof(OLED_GRAM));
+    OLED_Update();
+    return 0;
+}
+
+
 
 // OLED initialize 
 void vOLED_INIT()
@@ -2473,31 +2540,12 @@ void vPrintLogNumber2(char *str,...)
 	}
 }
 
-int Fill_Screen_All(uint8_t u8GrayScale)
-{
-    int i;
-    
-    // 1. 設定全螢幕的繪圖視窗範圍 (Window Addressing)
-    // SSD1322 的 Column 一個地址包含 4 個像素 (2 Bytes)
-    vWriteCommand(0x15);   // Set Column Address
-    vWriteData(0x1C);      // Start Column (28)
-    vWriteData(0x5B);      // End Column (91) -> 總共 64 個 Column (256像素)
-    
-    vWriteCommand(0x75);   // Set Row Address
-    vWriteData(0x00);      // Start Row (0)
-    vWriteData(0x3F);      // End Row (63) -> 總共 64 行
-    
-    vWriteCommand(0x5C);   // Enable Write RAM
-    
-    // 2. 進入純資料模式，連續寫入 8192 Bytes (256x64像素 / 2像素每Byte)
-    // 直接保留 u8GrayScale 參數，支援未來的灰階顯示需求！
-    for(i = 0; i < 8192; i++) 
-    {
-        vWriteData(u8GrayScale);
-    }
-    
-    return 0;
-}
+//// [請保留這個新版的，把另外一個很長的舊版刪掉！]
+//int Fill_Screen_All(uint8_t u8GrayScale) {
+//    memset(OLED_GRAM, u8GrayScale, sizeof(OLED_GRAM));
+//    OLED_Update();
+//    return 0;
+//}
 
 // =========================================================================
 // [終極升級版] 小字體 8x16 (支援滿版 32 字元，絕對防溢位當機)
@@ -2591,3 +2639,59 @@ void vPrintAsciiRaw2(int rawStr, int column16, char *strLeft, char *strRight)//G
     }       
 }
 
+// =======================================================
+// [新增] 快速清空指定列範圍 (用於清除動畫殘影)
+// =======================================================
+void OLED_Clear_Area(uint8_t start_row, uint8_t end_row) {
+    int i;
+    vWriteCommand(0x15); vWriteData(0x1C); vWriteData(0x5B);
+    vWriteCommand(0x75); vWriteData(start_row); vWriteData(end_row);
+    vWriteCommand(0x5C);
+    int total_bytes = (end_row - start_row + 1) * 128; // 每行 128 Bytes
+    for(i = 0; i < total_bytes; i++) vWriteData(0x00);
+}
+
+// =======================================================
+// [新增] 帶 Y 軸邊界裁切與動態亮度的底層字串渲染引擎
+// =======================================================
+extern const unsigned char font_8x16[]; // 確保能讀到字模
+
+void vPrintAsciiRaw_Clipped(int y, int min_y, int max_y, uint8_t brightness, char *strLeft, char *strRight) {
+    int i, j;
+    // 計算實際顯示在螢幕上的範圍
+    int start_row = (y < min_y) ? min_y : y;
+    int end_row = ((y + 15) > max_y) ? max_y : (y + 15);
+    if (start_row > end_row) return; // 完全在畫面外，不畫
+
+    int skip_top = start_row - y; // 字模從哪裡開始截斷
+    int draw_height = end_row - start_row + 1; // 實際要畫的像素高度
+
+    // --- 畫左半邊 (0~15 字元) ---
+    for(i = 0; i < 16; i++) {
+        char c = strLeft[i]; if(c < 0x20 || c > 0x7E) c = ' ';
+        vWriteCommand(0x15); vWriteData(0x1c + i*2); vWriteData(0x1c + i*2 + 1);
+        vWriteCommand(0x75); vWriteData(start_row); vWriteData(end_row); vWriteCommand(0x5c);
+        for(j = 0; j < draw_height; j++) {
+            unsigned char Data = font_8x16[((c - 0x20) * 16) + skip_top + j];
+            unsigned char temp;
+            temp = 0x00; if(Data & 0x80) temp|=(brightness<<4); if(Data & 0x40) temp|=brightness; vWriteData(temp);
+            temp = 0x00; if(Data & 0x20) temp|=(brightness<<4); if(Data & 0x10) temp|=brightness; vWriteData(temp);
+            temp = 0x00; if(Data & 0x08) temp|=(brightness<<4); if(Data & 0x04) temp|=brightness; vWriteData(temp);
+            temp = 0x00; if(Data & 0x02) temp|=(brightness<<4); if(Data & 0x01) temp|=brightness; vWriteData(temp);
+        }
+    }
+    // --- 畫右半邊 (16~31 字元) ---
+    for(i = 0; i < 16; i++) {
+        char c = strRight[i]; if(c < 0x20 || c > 0x7E) c = ' ';
+        vWriteCommand(0x15); vWriteData(0x3c + i*2); vWriteData(0x3c + i*2 + 1);
+        vWriteCommand(0x75); vWriteData(start_row); vWriteData(end_row); vWriteCommand(0x5c);
+        for(j = 0; j < draw_height; j++) {
+            unsigned char Data = font_8x16[((c - 0x20) * 16) + skip_top + j];
+            unsigned char temp;
+            temp = 0x00; if(Data & 0x80) temp|=(brightness<<4); if(Data & 0x40) temp|=brightness; vWriteData(temp);
+            temp = 0x00; if(Data & 0x20) temp|=(brightness<<4); if(Data & 0x10) temp|=brightness; vWriteData(temp);
+            temp = 0x00; if(Data & 0x08) temp|=(brightness<<4); if(Data & 0x04) temp|=brightness; vWriteData(temp);
+            temp = 0x00; if(Data & 0x02) temp|=(brightness<<4); if(Data & 0x01) temp|=brightness; vWriteData(temp);
+        }
+    }
+}
