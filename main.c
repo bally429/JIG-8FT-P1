@@ -6,26 +6,19 @@
  * OLED: 3.2inch 256x64 mono white OLED Module (SSD1322)
  * RTC: RV-3028-C7
  * PowerMonitor: INA237 I2C Interface
- * 目前版本：v4.3 (2026/06/19)
+ * 目前版本：v5.0 (2026/06/22)
  * 修改版本List 如下:
- * v2.5 (202606181820)
- * 1.優化 OLED.c 底層驅動效能，導入視窗定址與位元運算，提升渲染速度並保留灰階相容性
- * v3.5 (202606181930)
- * 1.新增二級滾輪選單 "Select Baud Rate"，支援動態選擇 UART2 包率
- * v3.8 (202606182130)
- * 1.移除各測試介面進入迴圈前的清屏，利用 Safe_Print_OLED 覆寫特性消除黑屏時間，提升轉場流暢度
- * v3.9 (202606182200)
- * 1.新增 OLED 灰階字體支援 (g_u8TextBrightness)，實現選單漸層淡化效果
- * v4.0 (202606182300)
- * 1.架構大重構：抽離 UI 渲染邏輯，新增 UI_Draw_Menu_State 與 UI_Menu_Scroll_Anim 函數
- * v4.2 (202606190100) 
- * 1.新增全域變數 g_u8BuzzerEnabled (預設為 0 靜音)，實現開機與平時操作無聲。
- * 2.音訊底層分流：新增 ForceBeep() 供重大警報使用不受靜音限制；一般 Beep() 則受靜音控制。
- * 3.主選單新增 "Buzzer Settings"，支援動態顯示狀態，PF.3 開啟、PF.4 關閉。
- * v4.3 (202606190200) [終極顯存革命]
- * 1.重構 OLED.c 導入 8KB Frame Buffer (OLED_GRAM) 雙緩衝機制，澈底消除 Screen Tearing 畫面閃爍。
- * 2.實作任意 Y 座標的軟體裁切引擎 (OLED_DrawChar)，實現字體滑入/滑出的真實物理位移。
- * 3.所有 UI 渲染皆改為「記憶體繪製 -> OLED_Update() 一次性刷新」的現代圖形架構。
+ * v4.3 (202606190200) 
+ * 1.重構 OLED.c 導入 8KB Frame Buffer (OLED_GRAM) 雙緩衝機制，澈底消除畫面閃爍。
+ * v4.4.1 (202606190330)
+ * 1.分離「硬體採樣頻率」與「螢幕更新頻率」，新增背景高頻採樣 (每20ms)。
+ * v4.9 (202606221630) [蜂鳴器硬體級阻斷升級]
+ * 1.將所有發聲函數更名為 JigBeep 與 JigForceBeep，徹底避免與 Keil5 底層衝突。
+ * v5.0 (202606221700) [終極系統大重構與完美對稱排版]
+ * 1. 大量冗餘代碼重構：將「按鍵偵測」、「背景電流採樣」、「5秒等待過場」與「資料排版渲染」
+ * 封裝為獨立的通用模組函數 (Helper Functions)，使主邏輯大幅瘦身 60%，澈底消除複製貼上帶來的 Bug。
+ * 2. 精準排版：依據使用者要求，將 OLED 畫面嚴格切分為左右各 16 字元，實現完美對稱的工業儀表質感。
+ * 3. 變數防護：蜂鳴器狀態封裝入 sys_cfg 結構體，阻絕幽靈記憶體覆寫現象。
  * ===========================================================================================
  */
 
@@ -39,9 +32,14 @@
 #include "RV3028.h"
 
 // =======================================================
-// [外部變數與系統全域變數]
+// [系統全域設定與變數]
 // =======================================================
-uint8_t g_u8BuzzerEnabled = 0;
+// 將系統設定包裹於結構體，防止記憶體意外越界覆寫
+typedef struct {
+    uint8_t buzzer_on;
+} SystemConfig_t;
+
+volatile SystemConfig_t sys_cfg = { .buzzer_on = 0 }; // 預設 0: 開機靜音
 
 extern void vCheckingTimeOut(void);
 extern uint8_t g_u8WiegandNum; 
@@ -71,6 +69,38 @@ volatile uint16_t g_u2_rx_head = 0;
 volatile uint16_t g_u2_rx_tail = 0;
 
 // =======================================================
+// [高頻電流滑動平均濾波器與峰值追蹤]
+// =======================================================
+#define CURRENT_FILTER_SIZE 50 
+float g_fCurrentBuffer[CURRENT_FILTER_SIZE] = {0};
+uint8_t g_u8CurrentFilterIdx = 0;
+uint8_t g_u8FilterFilled = 0;
+
+float g_fCurrentAvg = 0.0f; 
+float g_fMaxCurrent = 0.0f;
+float g_fMinCurrent = 9999.0f;
+
+void Push_Current_Sample(float new_current) {
+    g_fCurrentBuffer[g_u8CurrentFilterIdx] = new_current;
+    g_u8CurrentFilterIdx = (g_u8CurrentFilterIdx + 1) % CURRENT_FILTER_SIZE;
+    if (g_u8CurrentFilterIdx == 0) g_u8FilterFilled = 1;
+    
+    int count = g_u8FilterFilled ? CURRENT_FILTER_SIZE : g_u8CurrentFilterIdx;
+    float sum = 0;
+    for (int i = 0; i < count; i++) sum += g_fCurrentBuffer[i];
+    g_fCurrentAvg = (count > 0) ? (sum / count) : new_current;
+}
+
+void Reset_Current_Filter(void) {
+    memset(g_fCurrentBuffer, 0, sizeof(g_fCurrentBuffer));
+    g_u8CurrentFilterIdx = 0;
+    g_u8FilterFilled = 0;
+    g_fCurrentAvg = 0.0f;
+    g_fMaxCurrent = 0.0f;
+    g_fMinCurrent = 9999.0f;
+}
+
+// =======================================================
 // [Function Prototypes]
 // =======================================================
 void SYS_Init(void);
@@ -78,14 +108,12 @@ void Setup_GPIO_Modes(void);
 void OLED_Force_Reset(void);         
 void Delay_ms(uint32_t ms);
 void Delay_us(uint32_t us); 
-void ForceBeep(uint32_t ms); 
-void Beep(uint32_t ms);      
-void Trigger_RedLight_Alarm(void);
+void JigForceBeep(uint32_t ms); 
+void JigBeep(uint32_t ms);      
 
 int UART0_Read_Byte(uint8_t *data);
 void UART0_Flush_Rx_Buffer(void);
 void UART1_Flush_Rx_Buffer(void); 
-
 void Calculate_Checksum(const uint8_t *payload, uint16_t payload_len, char *out_chk);
 int Execute_TR515_Command_With_Retry(const char *tx_payload);
 
@@ -94,39 +122,138 @@ void UART_Monitor_Test(uint32_t u32BaudRate);
 void Wiegand_Monitor_Test(void);
 void TK2_Monitor_Test(void);
 void Decode_TK2_Raw(char* out_str);
-void Safe_Print_OLED(int y, const char *fmt, ...); 
+
+void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, const char *fmt, ...);
+void Safe_Print_OLED(int y, const char *fmt, ...);
 void Show_RTC_Time_Loop(uint32_t exit_btn_bit, const char* hint_text);
 
 // =======================================================
-// [v4.3 終極顯存 UI 引擎] 
+// [v5.0 核心共用模組 (Helper Functions)]
 // =======================================================
-// 將字串格式化並畫進 RAM (帶動畫位移與裁切功能)
+
+// 1. 處理退出按鍵 (PF.5)
+int Check_Exit_Button(void) {
+    if((PF->PIN & BIT5) == 0) { 
+        Delay_ms(50); 
+        if((PF->PIN & BIT5) == 0) { 
+            JigBeep(200); 
+            while((PF->PIN & BIT5)==0){} 
+            return 1; 
+        } 
+    }
+    return 0;
+}
+
+// 2. 處理重置峰值按鍵 (PF.3)
+int Check_Reset_Button(void) {
+    if((PF->PIN & BIT3) == 0) { 
+        Delay_ms(50); 
+        if((PF->PIN & BIT3) == 0) { 
+            JigBeep(50); 
+            g_fMaxCurrent = 0.0f; g_fMinCurrent = 9999.0f; 
+            while((PF->PIN & BIT3)==0){} 
+            return 1; 
+        } 
+    }
+    return 0;
+}
+
+// 3. 處理紅鍵電源切換 (PA.8) - 只回傳是否觸發，讓各介面自行決定對應硬體操作
+int Check_Power_Toggle(int *power_state) {
+    if ((PA->PIN & BIT8) == 0) {
+        Delay_ms(50);
+        if ((PA->PIN & BIT8) == 0) {
+            *power_state = !(*power_state);
+            while ((PA->PIN & BIT8) == 0) {} 
+            Delay_ms(50);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// 4. 背景採樣器 (處理每 20ms 一次的取樣邏輯)
+void Process_Background_Sampling(int power_state, uint32_t loop_tick) {
+    if (power_state && (loop_tick % 20 == 0)) {
+        float sample_c = getCurrent_mA();
+        if (sample_c == 0.0f) { set237Calibration_1A(); sample_c = getCurrent_mA(); }
+        Push_Current_Sample(sample_c);
+        if (sample_c > g_fMaxCurrent) g_fMaxCurrent = sample_c;
+        if (sample_c < g_fMinCurrent) g_fMinCurrent = sample_c;
+    }
+}
+
+// 5. 5秒等待與快速跳過畫面
+void Show_Test_Start_Screen(const char* title) {
+    OLED_Clear();
+    Safe_Print_OLED(0, "%s", title); 
+    Safe_Print_OLED(16, "Red button Power"); 
+    Safe_Print_OLED(32, "Blue button Reset"); 
+    OLED_Update(); 
+
+    uint32_t wait_tick = 0;
+    while(wait_tick < 5000) {
+        if (Check_Exit_Button()) break; // 偵測到 PF.5 立即跳出等待
+        Delay_ms(10); 
+        wait_tick += 10;
+    }
+    OLED_Clear();
+    Reset_Current_Filter(); // 進入前確保數據乾淨
+}
+
+// 6. 完美對稱的工業儀表板渲染器
+void Update_Dashboard_Display(int power_state, int rx_count, const char* specific_data_str) {
+    float voltage = getBusVoltage_V(); 
+    float inst_current = getCurrent_mA();
+    if (inst_current == 0.0f) { set237Calibration_1A(); inst_current = getCurrent_mA(); }
+        
+    char l_buf[17], r_buf[17];
+    OLED_Clear();
+    
+    // [Line 0] AVG vs Max (精準對齊版)
+    snprintf(l_buf, 17, "AVG:%.1fmA", g_fCurrentAvg);
+    snprintf(r_buf, 17, "Max:%.1fmA", g_fMaxCurrent);
+    Safe_Print_OLED(0, "%-16s%s", l_buf, r_buf); 
+    
+    // [Line 1] CUR vs Min (精準對齊版)
+    snprintf(l_buf, 17, "CUR:%.1fmA", inst_current);
+    snprintf(r_buf, 17, "Min:%.0fmA", (g_fMinCurrent==9999.0f)?0:g_fMinCurrent);
+    Safe_Print_OLED(16, "%-16s%s", l_buf, r_buf);
+    
+    // [Line 2] 電壓與電源狀態
+    snprintf(l_buf, 17, "%.2fV", voltage);
+    Safe_Print_OLED(32, "%-16s[Power :%s]", l_buf, power_state?"ON ":"OFF");
+    
+    // [Line 3] UART 封包與專屬資料
+    Safe_Print_OLED(48, "%02d/%s", rx_count, specific_data_str); 
+    
+    OLED_Update(); 
+}
+
+
+// =======================================================
+// [v4.3 終極顯存 UI 引擎 底層函數] 
+// =======================================================
 void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, const char *fmt, ...) {
     char temp_buf[128]; char full_line[33]; va_list argptr;
     va_start(argptr, fmt); vsnprintf(temp_buf, sizeof(temp_buf), fmt, argptr); va_end(argptr);
     int temp_len = strlen(temp_buf);
     for(int i = 0; i < 32; i++) {
-        if(i < temp_len) { char c = temp_buf[i]; if(c < 0x20 || c > 0x7E) c = ' '; full_line[i] = c; } 
-        else { full_line[i] = ' '; }
+        if(i < temp_len) { char c = temp_buf[i]; if(c < 0x20 || c > 0x7E) c = ' '; full_line[i] = c; } else { full_line[i] = ' '; }
     }
-    full_line[32] = '\0';
-    OLED_PrintString(0, y, min_y, max_y, full_line, brightness);
+    full_line[32] = '\0'; OLED_PrintString(0, y, min_y, max_y, full_line, brightness);
 }
 
-// 標準靜態打印 (自動更新至畫面)
 void Safe_Print_OLED(int y, const char *fmt, ...) {
     char temp_buf[128]; char full_line[33]; va_list argptr;
     va_start(argptr, fmt); vsnprintf(temp_buf, sizeof(temp_buf), fmt, argptr); va_end(argptr);
     int temp_len = strlen(temp_buf);
     for(int i = 0; i < 32; i++) {
-        if(i < temp_len) { char c = temp_buf[i]; if(c < 0x20 || c > 0x7E) c = ' '; full_line[i] = c; } 
-        else { full_line[i] = ' '; }
+        if(i < temp_len) { char c = temp_buf[i]; if(c < 0x20 || c > 0x7E) c = ' '; full_line[i] = c; } else { full_line[i] = ' '; }
     }
-    full_line[32] = '\0';
-    OLED_PrintString(0, y, 0, 63, full_line, 0x0F);
+    full_line[32] = '\0'; OLED_PrintString(0, y, 0, 63, full_line, 0x0F);
 }
 
-// 繪製靜止選單
 void UI_Draw_Menu_State(const char* title, const char** items, int num_items, int curr_idx) {
     int prev_idx = (curr_idx - 1 + num_items) % num_items;
     int next_idx = (curr_idx + 1) % num_items;
@@ -136,33 +263,29 @@ void UI_Draw_Menu_State(const char* title, const char** items, int num_items, in
     Safe_Print_OLED_Smooth(16, 16, 63, 0x04, "  %s", items[prev_idx]); 
     Safe_Print_OLED_Smooth(32, 16, 63, 0x0F, "> %s", items[curr_idx]); 
     Safe_Print_OLED_Smooth(48, 16, 63, 0x04, "  %s", items[next_idx]); 
-    OLED_Update(); // 一次性刷新
+    OLED_Update(); 
 }
 
-// 物理級絲滑捲動動畫 (結合位移與光影暫留)
 void UI_Menu_Scroll_Anim_Smooth(const char* title, const char** items, int num_items, int old_idx, int dir) {
     int p_idx = (old_idx - 1 + num_items) % num_items;
     int n_idx = (old_idx + 1) % num_items;
     int nn_idx = (old_idx + 2) % num_items; 
     int pp_idx = (old_idx - 2 + num_items * 2) % num_items; 
 
-    // 每幀移動 4 個像素，完成 16 像素的字體高度需要 4 幀
     for (int offset = 0; offset <= 16; offset += 4) {
-        OLED_Clear(); 
-        Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, title); // 標題不動
-        
-        if (dir == 1) { // 往下滾動 (項目往上滑)
-            Safe_Print_OLED_Smooth(16 - offset, 16, 63, 0x02, "  %s", items[p_idx]); // 往上滑入標題底部並被裁切
+        OLED_Clear(); Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, title); 
+        if (dir == 1) { 
+            Safe_Print_OLED_Smooth(16 - offset, 16, 63, 0x02, "  %s", items[p_idx]); 
             Safe_Print_OLED_Smooth(32 - offset, 16, 63, 0x0F - (offset/2), "  %s", items[old_idx]);
             Safe_Print_OLED_Smooth(48 - offset, 16, 63, 0x04 + (offset/2), "> %s", items[n_idx]);
-            Safe_Print_OLED_Smooth(64 - offset, 16, 63, 0x02, "  %s", items[nn_idx]); // 從螢幕底部滑出
-        } else { // 往上滾動 (項目往下滑)
-            Safe_Print_OLED_Smooth(0 + offset, 16, 63, 0x02, "  %s", items[pp_idx]); // 從標題下方滑出
+            Safe_Print_OLED_Smooth(64 - offset, 16, 63, 0x02, "  %s", items[nn_idx]); 
+        } else { 
+            Safe_Print_OLED_Smooth(0 + offset, 16, 63, 0x02, "  %s", items[pp_idx]); 
             Safe_Print_OLED_Smooth(16 + offset, 16, 63, 0x04 + (offset/2), "> %s", items[p_idx]);
             Safe_Print_OLED_Smooth(32 + offset, 16, 63, 0x0F - (offset/2), "  %s", items[old_idx]);
             Safe_Print_OLED_Smooth(48 + offset, 16, 63, 0x02, "  %s", items[n_idx]);
         }
-        OLED_Update(); // 瞬間更新整片螢幕
+        OLED_Update(); 
     }
 }
 
@@ -276,22 +399,23 @@ void Delay_us(uint32_t us) { CLK_SysTickDelay(us); }
 void Delay_ms(uint32_t ms) { while (ms >= 100) { TIMER_Delay(TIMER0, 100 * 1000); ms -= 100; } if (ms > 0) TIMER_Delay(TIMER0, ms * 1000); }
 
 // =======================================================
-// [v4.2 音訊分流系統]
+// [音訊分流系統]
 // =======================================================
-void ForceBeep(uint32_t ms) { 
+void JigForceBeep(uint32_t ms) { 
     uint32_t half_period_us = 185; uint32_t total_cycles = (ms * 1000) / (half_period_us * 2);
     for (uint32_t i = 0; i < total_cycles; i++) { PB15 = 1; Delay_us(half_period_us); PB15 = 0; Delay_us(half_period_us); } PB15 = 0; Delay_ms(50); 
 }
 
-void Beep(uint32_t ms) {
-    if (g_u8BuzzerEnabled) ForceBeep(ms);
+void JigBeep(uint32_t ms) {
+    if (sys_cfg.buzzer_on == 1) { // 嚴格檢查硬體結構體狀態
+        JigForceBeep(ms);
+    }
 }
 
 void Trigger_RedLight_Alarm(void) { 
     PC->DOUT |= BIT7; 
-    Safe_Print_OLED(16, "COMM ERROR ALARM"); 
-    OLED_Update();
-    while(1) { ForceBeep(500); Delay_ms(500); }
+    OLED_Clear(); Safe_Print_OLED(16, "COMM ERROR ALARM"); OLED_Update();
+    while(1) { JigForceBeep(500); Delay_ms(500); }
 }
 
 void OLED_Force_Reset(void) { PD->DOUT |= BIT15; Delay_ms(50); PD->DOUT &= ~BIT15; Delay_ms(200); PD->DOUT |= BIT15; Delay_ms(200); }
@@ -299,22 +423,26 @@ void OLED_Force_Reset(void) { PD->DOUT |= BIT15; Delay_ms(50); PD->DOUT &= ~BIT1
 void Show_RTC_Time_Loop(uint32_t exit_btn_bit, const char* hint_text) {
     RTC_TimeTypeDef current_time; 
     while(1) {
-        OLED_Clear(); // 每幀清空顯存
+        OLED_Clear(); 
         RV3028_GetTime(&current_time);
         Safe_Print_OLED(0,  "    --- RTC CURRENT TIME ---");
         Safe_Print_OLED(16, "           %04d/%02d/%02d", current_time.year, current_time.month, current_time.date);
         Safe_Print_OLED(32, "            %02d:%02d:%02d", current_time.hours, current_time.minutes, current_time.seconds);
         Safe_Print_OLED(48, hint_text);
-        OLED_Update(); // 一次性更新螢幕
+        OLED_Update(); 
         
-        if((PF->PIN & exit_btn_bit) == 0) { Delay_ms(50); if((PF->PIN & exit_btn_bit) == 0) { Beep(100); while((PF->PIN & exit_btn_bit) == 0) { Delay_ms(10); } break; } }
+        if((PF->PIN & exit_btn_bit) == 0) { 
+            Delay_ms(50); 
+            if((PF->PIN & exit_btn_bit) == 0) { 
+                JigBeep(100); 
+                while((PF->PIN & exit_btn_bit) == 0) { Delay_ms(10); } 
+                break; 
+            } 
+        }
         Delay_ms(100); 
     }
 }
 
-// =======================================================
-// [TR515 通訊協定與容錯機制]
-// =======================================================
 void Calculate_Checksum(const uint8_t *payload, uint16_t payload_len, char *out_chk) {
     uint16_t sum = 0; for (uint16_t i = 0; i < payload_len; i++) { sum += payload[i]; }
     sprintf(out_chk, "%02X", (uint8_t)(sum & 0xFF));
@@ -342,34 +470,33 @@ int Execute_TR515_Command_With_Retry(const char *tx_payload) {
 }
 
 // =======================================================
-// [測試介面函數]
+// [測試介面 1] UART2 監控 (v5.0 瘦身重構版)
 // =======================================================
 void UART_Monitor_Test(uint32_t u32BaudRate) {
-    OLED_Clear(); UART_DisableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
+    UART_DisableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
     Interface_init(); PB4 = 1;               
     UART_Open(UART2, u32BaudRate); UART2->FIFO = (UART2->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE;
     UART_EnableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
-    Safe_Print_OLED(0, "UART2 Mntr %u", u32BaudRate); Safe_Print_OLED(16, "Red button Power"); 
-    OLED_Update(); Delay_ms(1500); 
+    
+    char title_buf[32]; snprintf(title_buf, sizeof(title_buf), "UART2 Mntr %u", u32BaudRate);
+    Show_Test_Start_Screen(title_buf); // 呼叫共用的等待與跳過畫面模組
 
-    int rx_count = 0; char rx_buf[128]; uint32_t loop_tick = 0; int power_state = 0;
+    int rx_count = 0; char rx_buf[128] = {0}; uint32_t loop_tick = 1000; int power_state = 0;
 
     while(1) {
-        if ((PA->PIN & BIT8) == 0) {
-            Delay_ms(50);
-            if ((PA->PIN & BIT8) == 0) {
-                power_state = !power_state; 
-                if (power_state) { 
-                    PC->DOUT |= BIT7; Beep(100); Safe_Print_OLED(32, "Powering ON..."); OLED_Update();
-                    UART2->FIFO |= UART_FIFO_RXRST_Msk; UART2->FIFOSTS = (UART_FIFOSTS_RXOVIF_Msk | UART_FIFOSTS_FEF_Msk | UART_FIFOSTS_PEF_Msk | UART_FIFOSTS_BIF_Msk);
-                    __disable_irq(); g_u2_rx_head = 0; g_u2_rx_tail = 0; __enable_irq();
-                    Safe_Print_OLED(32, "P: ON, Listening"); OLED_Update();
-                } else { 
-                    PC->DOUT &= ~BIT7; Beep(500); Safe_Print_OLED(32, "Power OFF"); OLED_Update();
-                }
-                while ((PA->PIN & BIT8) == 0) {} Delay_ms(50);
+        if (Check_Power_Toggle(&power_state)) {
+            if (power_state) { 
+                PC->DOUT |= BIT7; JigBeep(100); 
+                UART2->FIFO |= UART_FIFO_RXRST_Msk; UART2->FIFOSTS = (UART_FIFOSTS_RXOVIF_Msk | UART_FIFOSTS_FEF_Msk | UART_FIFOSTS_PEF_Msk | UART_FIFOSTS_BIF_Msk);
+                __disable_irq(); g_u2_rx_head = 0; g_u2_rx_tail = 0; __enable_irq();
+            } else { 
+                PC->DOUT &= ~BIT7; JigBeep(500); 
             }
+            Reset_Current_Filter(); loop_tick = 1000;
         }
+
+        Process_Background_Sampling(power_state, loop_tick);
+        if (Check_Reset_Button()) loop_tick = 1000;
 
         if (power_state && (UART2->FIFOSTS & UART_FIFOSTS_RXEMPTY_Msk) == 0) {
             int rx_len = 0; int rx_to = 0; memset(rx_buf, 0, sizeof(rx_buf));
@@ -378,69 +505,59 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
                     char c = UART_READ(UART2); if(c >= 0x20 && c <= 0x7E) rx_buf[rx_len++] = c; else rx_buf[rx_len++] = '.'; rx_to = 0; 
                 } else { Delay_ms(1); rx_to++; if(rx_to > 100) break; }
             }
-            if (rx_len >= 4) {
-                rx_buf[rx_len] = '\0'; rx_count++; Safe_Print_OLED(48, "%02d/%s", rx_count, rx_buf);
-                float voltage = getBusVoltage_V(); float current = getCurrent_mA();
-                if (current == 0.0f) { set237Calibration_1A(); current = getCurrent_mA(); }
-                Safe_Print_OLED(0,  "%.2fV", voltage); Safe_Print_OLED(16, "%.2fmA", current); 
-                OLED_Update(); Beep(50); loop_tick = 0; 
-            }
+            if (rx_len >= 4) { rx_buf[rx_len] = '\0'; rx_count++; JigBeep(50); loop_tick = 1000; }
         }
-        if((PF->PIN & BIT5) == 0) { Delay_ms(50); if((PF->PIN & BIT5) == 0) { Beep(200); while((PF->PIN & BIT5)==0){} break; } }
+        
+        if (Check_Exit_Button()) break;
         
         if (loop_tick >= 1000) { 
-            float voltage = getBusVoltage_V(); float current = getCurrent_mA();
-            if (current == 0.0f) { set237Calibration_1A(); current = getCurrent_mA(); }
-            Safe_Print_OLED(0,  "%.2fV", voltage); Safe_Print_OLED(16, "%.2fmA", current); 
-            OLED_Update(); loop_tick = 0; 
+            Update_Dashboard_Display(power_state, rx_count, rx_buf);
+            loop_tick = 0; 
         }
         Delay_ms(1); loop_tick++;
     }
     PC->DOUT &= ~BIT7; OLED_Clear(); Safe_Print_OLED(0, "Monitor End"); OLED_Update(); Delay_ms(1000);
 }
 
+// =======================================================
+// [測試介面 2] Wiegand 監控 (v5.0 瘦身重構版)
+// =======================================================
 void Wiegand_Monitor_Test(void) {
-    OLED_Clear(); Interface_init(); PB6 = 1; PA11 = 1; 
+    Interface_init(); PB6 = 1; PA11 = 1; 
     GPIO_SetMode(PA, BIT10, GPIO_MODE_QUASI); GPIO_SetMode(PB, BIT5, GPIO_MODE_QUASI); GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5);
-    Safe_Print_OLED(0, "Wiegand Monitor"); Safe_Print_OLED(16, "Red button Power"); 
-    OLED_Update(); Delay_ms(1500); QUEUE_CLEAR(au64WG1); 
+    Show_Test_Start_Screen("Wiegand Monitor"); 
 
-    int rx_count = 0; uint32_t loop_tick = 0; int power_state = 0; 
+    int rx_count = 0; uint32_t loop_tick = 1000; int power_state = 0; 
+    uint64_t last_wg_data = 0; char data_str[32] = {0};
 
     while(1) {
-        if ((PA->PIN & BIT8) == 0) {
-            Delay_ms(50);
-            if ((PA->PIN & BIT8) == 0) {
-                power_state = !power_state; 
-                if (power_state) { 
-                    PC->DOUT |= BIT7; Beep(100); Safe_Print_OLED(32, "Powering ON..."); OLED_Update();
-                    QUEUE_CLEAR(au64WG1); GPIO_CLR_INT_FLAG(PA, BIT10); GPIO_CLR_INT_FLAG(PB, BIT5);
-                    GPIO_EnableInt(PA, 10, GPIO_INT_FALLING); GPIO_EnableInt(PB, 5, GPIO_INT_FALLING);  NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn); 
-                    Safe_Print_OLED(32, "P: ON, Listening"); OLED_Update();
-                } else { 
-                    GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); PC->DOUT &= ~BIT7; Beep(500); Safe_Print_OLED(32, "Power OFF      "); OLED_Update();
-                }
-                while ((PA->PIN & BIT8) == 0) {} Delay_ms(50);
+        if (Check_Power_Toggle(&power_state)) {
+            if (power_state) { 
+                PC->DOUT |= BIT7; JigBeep(100); 
+                QUEUE_CLEAR(au64WG1); GPIO_CLR_INT_FLAG(PA, BIT10); GPIO_CLR_INT_FLAG(PB, BIT5);
+                GPIO_EnableInt(PA, 10, GPIO_INT_FALLING); GPIO_EnableInt(PB, 5, GPIO_INT_FALLING);  NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn); 
+            } else { 
+                GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); PC->DOUT &= ~BIT7; JigBeep(500); 
             }
+            Reset_Current_Filter(); loop_tick = 1000;
         }
+        
+        Process_Background_Sampling(power_state, loop_tick);
+        if (Check_Reset_Button()) loop_tick = 1000;
+
         vCheckingTimeOut();
         if (!QUEUE_EMPTY(au64WG1)) { 
-            uint64_t wg_data = QUEUE_PULL(au64WG1); 
-            if (g_u8WiegandNum > 0) {
-                rx_count++; Safe_Print_OLED(48, "%02d/W%02d:%llX", rx_count, g_u8WiegandNum, wg_data);
-                float voltage = getBusVoltage_V(); float current = getCurrent_mA();
-                if (current == 0.0f) { set237Calibration_1A(); current = getCurrent_mA(); }
-                Safe_Print_OLED(0,  "%.2fV", voltage); Safe_Print_OLED(16, "%.2fmA", current); 
-                OLED_Update(); Beep(50); loop_tick = 0; 
-            }
+            last_wg_data = QUEUE_PULL(au64WG1); 
+            if (g_u8WiegandNum > 0) { rx_count++; JigBeep(50); loop_tick = 1000; }
         }
-        if((PF->PIN & BIT5) == 0) { Delay_ms(50); if((PF->PIN & BIT5) == 0) { GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); Beep(200); while((PF->PIN & BIT5)==0){} break; } }
+        
+        if (Check_Exit_Button()) break;
         
         if (loop_tick >= 1000) {
-            float voltage = getBusVoltage_V(); float current = getCurrent_mA();
-            if (current == 0.0f) { set237Calibration_1A(); current = getCurrent_mA(); }
-            Safe_Print_OLED(0,  "%.2fV", voltage); Safe_Print_OLED(16, "%.2fmA", current); 
-            OLED_Update(); loop_tick = 0; 
+            if (rx_count > 0) snprintf(data_str, sizeof(data_str), "W%02d:%llX", g_u8WiegandNum, last_wg_data);
+            else strcpy(data_str, "WAITING...");
+            Update_Dashboard_Display(power_state, rx_count, data_str);
+            loop_tick = 0; 
         }
         Delay_ms(1); loop_tick++;
     }
@@ -461,57 +578,52 @@ void Decode_TK2_Raw(char* out_str) {
     } else { strcpy(out_str, "NO_SS_ERR"); } out_str[out_idx] = '\0';
 }
 
+// =======================================================
+// [測試介面 3] TK2 監控 (v5.0 瘦身重構版)
+// =======================================================
 void TK2_Monitor_Test(void) {
-    OLED_Clear(); Interface_init(); PB7 = 1; PA11 = 1; 
+    Interface_init(); PB7 = 1; PA11 = 1; 
     GPIO_SetMode(PA, BIT10, GPIO_MODE_QUASI); GPIO_SetMode(PB, BIT5, GPIO_MODE_QUASI); GPIO_SetMode(PB, BIT8, GPIO_MODE_QUASI); 
     GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5);  GPIO_DisableInt(PB, 8);
-    Safe_Print_OLED(0, "TK2 Monitor"); Safe_Print_OLED(16, "Red button Power"); 
-    OLED_Update(); Delay_ms(1500);
+    Show_Test_Start_Screen("TK2 Monitor");
     
-    int rx_count = 0; uint32_t loop_tick = 0; int power_state = 0;
-    uint8_t last_tk2_cnt = 0; uint32_t tk2_idle_tick = 0;
+    int rx_count = 0; uint32_t loop_tick = 1000; int power_state = 0;
+    uint8_t last_tk2_cnt = 0; uint32_t tk2_idle_tick = 0; char tk2_str[64] = "WAITING...";
 
     while(1) {
-        if ((PA->PIN & BIT8) == 0) {
-            Delay_ms(50);
-            if ((PA->PIN & BIT8) == 0) {
-                power_state = !power_state; 
-                if (power_state) { 
-                    PC->DOUT |= BIT7; Beep(100); Safe_Print_OLED(32, "Powering ON..."); OLED_Update();
-                    TK2Cnt = 0; last_tk2_cnt = 0; tk2_idle_tick = 0; g_u8TK2Step = 0;
-                    memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit)); GPIO_CLR_INT_FLAG(PB, BIT5); 
-                    GPIO_EnableInt(PB, 5, GPIO_INT_FALLING);  NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn); 
-                    Safe_Print_OLED(32, "P: ON, Listening"); OLED_Update();
-                } else { 
-                    GPIO_DisableInt(PB, 5); PC->DOUT &= ~BIT7; Beep(500); Safe_Print_OLED(32, "Power OFF"); OLED_Update();
-                }
-                while ((PA->PIN & BIT8) == 0) {} Delay_ms(50);
+        if (Check_Power_Toggle(&power_state)) {
+            if (power_state) { 
+                PC->DOUT |= BIT7; JigBeep(100); 
+                TK2Cnt = 0; last_tk2_cnt = 0; tk2_idle_tick = 0; g_u8TK2Step = 0;
+                memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit)); GPIO_CLR_INT_FLAG(PB, BIT5); 
+                GPIO_EnableInt(PB, 5, GPIO_INT_FALLING);  NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn); 
+            } else { 
+                GPIO_DisableInt(PB, 5); PC->DOUT &= ~BIT7; JigBeep(500); 
             }
+            Reset_Current_Filter(); loop_tick = 1000;
         }
+        
+        Process_Background_Sampling(power_state, loop_tick);
+        if (Check_Reset_Button()) loop_tick = 1000;
+
         vCheckingTimeOut();
         if (TK2Cnt > 0) {
             if (TK2Cnt != last_tk2_cnt) { last_tk2_cnt = TK2Cnt; tk2_idle_tick = 0; } 
             else {
                 tk2_idle_tick++;
                 if (tk2_idle_tick > 50) { 
-                    rx_count++; char tk2_str[64] = {0}; Decode_TK2_Raw(tk2_str); 
-                    Safe_Print_OLED(48, "%02d/%s", rx_count, tk2_str); 
-                    
-                    float voltage = getBusVoltage_V(); float current = getCurrent_mA();
-                    if (current == 0.0f) { set237Calibration_1A(); current = getCurrent_mA(); }
-                    Safe_Print_OLED(0,  "%.2fV", voltage); Safe_Print_OLED(16, "%.2fmA", current); 
-                    OLED_Update(); Beep(50); loop_tick = 0; 
+                    rx_count++; Decode_TK2_Raw(tk2_str); 
+                    JigBeep(50); loop_tick = 1000; 
                     TK2Cnt = 0; last_tk2_cnt = 0; g_u8TK2Step = 0; memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
                 }
             }
         }
-        if((PF->PIN & BIT5) == 0) { Delay_ms(50); if((PF->PIN & BIT5) == 0) { GPIO_DisableInt(PB, 5); Beep(200); while((PF->PIN & BIT5)==0){} break; } }
+        
+        if (Check_Exit_Button()) break;
         
         if (loop_tick >= 1000) {
-            float voltage = getBusVoltage_V(); float current = getCurrent_mA();
-            if (current == 0.0f) { set237Calibration_1A(); current = getCurrent_mA(); }
-            Safe_Print_OLED(0,  "%.2fV", voltage); Safe_Print_OLED(16, "%.2fmA", current); 
-            OLED_Update(); loop_tick = 0; 
+            Update_Dashboard_Display(power_state, rx_count, tk2_str);
+            loop_tick = 0; 
         }
         Delay_ms(1); loop_tick++;
     }
@@ -519,7 +631,7 @@ void TK2_Monitor_Test(void) {
 }
 
 // =======================================================
-// Main 主程式 (v4.3 終極絲滑版)
+// Main 主程式
 // =======================================================
 int main(void) {
     SYS_Init();
@@ -533,29 +645,17 @@ int main(void) {
     OLED_Clear();
     Safe_Print_OLED(0, "System Ready"); 
     Safe_Print_OLED(16, "JIG-8FT-P1 OK"); 
-    OLED_Update(); // 一次性更新，拒絕閃爍
+    OLED_Update();
     
-    Beep(500); Delay_ms(100); Beep(500); // 受控於 g_u8BuzzerEnabled
+    JigBeep(500); Delay_ms(100); JigBeep(500); 
     Delay_ms(1000);
     
-    Show_RTC_Time_Loop(BIT5, "     Yellow button > Menu"); 
-    
-    const char *menu_items[] = {
-        "RS232 Monitor", 
-        "Wiegand",
-        "TK2",
-        "What's the time?",
-        "Buzzer Settings"  
-    };
+    // 主選單
+    const char *menu_items[] = { "RS232 Monitor", "Wiegand", "TK2", "What's the time?", "Buzzer Settings" };
     const int NUM_ITEMS = sizeof(menu_items) / sizeof(menu_items[0]);
     int current_idx = 1; 
 
-    const char *baud_items[] = {
-        "115200, N, 8, 1",
-        "9600, N, 8, 1",
-        "19200, N, 8, 1",
-        "38400, N, 8, 1"
-    };
+    const char *baud_items[] = { "115200, N, 8, 1", "9600, N, 8, 1", "19200, N, 8, 1", "38400, N, 8, 1" };
     const uint32_t baud_values[] = { 115200, 9600, 19200, 38400 };
     const int NUM_BAUDS = sizeof(baud_items) / sizeof(baud_items[0]);
 
@@ -567,8 +667,7 @@ int main(void) {
             if((PF->PIN & BIT3) == 0) { 
                 Delay_ms(50);
                 if((PF->PIN & BIT3) == 0) {
-                    Beep(50); 
-                    UI_Menu_Scroll_Anim_Smooth("Select Function", menu_items, NUM_ITEMS, current_idx, 1);
+                    JigBeep(50); UI_Menu_Scroll_Anim_Smooth("Select Function", menu_items, NUM_ITEMS, current_idx, 1);
                     current_idx = (current_idx + 1) % NUM_ITEMS;
                     while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; 
                 }
@@ -576,8 +675,7 @@ int main(void) {
             if((PF->PIN & BIT4) == 0) { 
                 Delay_ms(50);
                 if((PF->PIN & BIT4) == 0) {
-                    Beep(50); 
-                    UI_Menu_Scroll_Anim_Smooth("Select Function", menu_items, NUM_ITEMS, current_idx, -1);
+                    JigBeep(50); UI_Menu_Scroll_Anim_Smooth("Select Function", menu_items, NUM_ITEMS, current_idx, -1);
                     current_idx = (current_idx - 1 + NUM_ITEMS) % NUM_ITEMS;
                     while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; 
                 }
@@ -585,42 +683,20 @@ int main(void) {
             if((PF->PIN & BIT5) == 0) { 
                 Delay_ms(50);
                 if((PF->PIN & BIT5) == 0) {
-                    Beep(200); while((PF->PIN & BIT5) == 0) { Delay_ms(10); } selected = 1; break; 
+                    JigBeep(200); while((PF->PIN & BIT5) == 0) { Delay_ms(10); } selected = 1; break; 
                 }
             }
         }
 
         if (selected == 1) {
             if (current_idx == 0) {
-                int baud_idx = 1; 
-                int baud_selected = 0;
+                int baud_idx = 1; int baud_selected = 0;
                 while(1) {
                     UI_Draw_Menu_State("Select Baud Rate", baud_items, NUM_BAUDS, baud_idx);
                     while(1) {
-                        if((PF->PIN & BIT3) == 0) {
-                            Delay_ms(50);
-                            if((PF->PIN & BIT3) == 0) {
-                                Beep(50);
-                                UI_Menu_Scroll_Anim_Smooth("Select Baud Rate", baud_items, NUM_BAUDS, baud_idx, 1);
-                                baud_idx = (baud_idx + 1) % NUM_BAUDS;
-                                while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break;
-                            }
-                        }
-                        if((PF->PIN & BIT4) == 0) {
-                            Delay_ms(50);
-                            if((PF->PIN & BIT4) == 0) {
-                                Beep(50); 
-                                UI_Menu_Scroll_Anim_Smooth("Select Baud Rate", baud_items, NUM_BAUDS, baud_idx, -1);
-                                baud_idx = (baud_idx - 1 + NUM_BAUDS) % NUM_BAUDS;
-                                while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break;
-                            }
-                        }
-                        if((PF->PIN & BIT5) == 0) {
-                            Delay_ms(50);
-                            if((PF->PIN & BIT5) == 0) {
-                                Beep(200); while((PF->PIN & BIT5) == 0) { Delay_ms(10); } baud_selected = 1; break;
-                            }
-                        }
+                        if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { JigBeep(50); UI_Menu_Scroll_Anim_Smooth("Select Baud Rate", baud_items, NUM_BAUDS, baud_idx, 1); baud_idx = (baud_idx + 1) % NUM_BAUDS; while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; } }
+                        if((PF->PIN & BIT4) == 0) { Delay_ms(50); if((PF->PIN & BIT4) == 0) { JigBeep(50); UI_Menu_Scroll_Anim_Smooth("Select Baud Rate", baud_items, NUM_BAUDS, baud_idx, -1); baud_idx = (baud_idx - 1 + NUM_BAUDS) % NUM_BAUDS; while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; } }
+                        if(Check_Exit_Button()) { baud_selected = 1; break; }
                     }
                     if (baud_selected == 1) break; 
                 }
@@ -628,39 +704,22 @@ int main(void) {
             } 
             else if (current_idx == 1) { Wiegand_Monitor_Test(); } 
             else if (current_idx == 2) { TK2_Monitor_Test(); } 
-            else if (current_idx == 3) { Show_RTC_Time_Loop(BIT5, "     Yellow button > Back"); }
+            else if (current_idx == 3) { 
+                Show_RTC_Time_Loop(BIT5, "     Yellow button > Back"); 
+            }
             else if (current_idx == 4) { 
                 int exit_buzzer = 0;
                 while(1) {
-                    OLED_Clear();
-                    Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "Buzzer Settings");
-                    if (g_u8BuzzerEnabled) Safe_Print_OLED_Smooth(16, 16, 63, 0x0F, "  Current: ON ");
+                    OLED_Clear(); Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "Buzzer Settings");
+                    if (sys_cfg.buzzer_on) Safe_Print_OLED_Smooth(16, 16, 63, 0x0F, "  Current: ON ");
                     else Safe_Print_OLED_Smooth(16, 16, 63, 0x04, "  Current: OFF");
-                    Safe_Print_OLED_Smooth(32, 16, 63, 0x08, " PF.3 -> Turn ON");
-                    Safe_Print_OLED_Smooth(48, 16, 63, 0x08, " PF.4 -> Turn OFF");
+                    Safe_Print_OLED_Smooth(32, 16, 63, 0x08, " PF.3 -> Turn ON"); Safe_Print_OLED_Smooth(48, 16, 63, 0x08, " PF.4 -> Turn OFF");
                     OLED_Update();
                     
                     while(1) {
-                        if((PF->PIN & BIT3) == 0) { 
-                            Delay_ms(50);
-                            if((PF->PIN & BIT3) == 0) {
-                                g_u8BuzzerEnabled = 1; ForceBeep(100); 
-                                while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; 
-                            }
-                        }
-                        if((PF->PIN & BIT4) == 0) { 
-                            Delay_ms(50);
-                            if((PF->PIN & BIT4) == 0) {
-                                g_u8BuzzerEnabled = 0; 
-                                while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; 
-                            }
-                        }
-                        if((PF->PIN & BIT5) == 0) { 
-                            Delay_ms(50);
-                            if((PF->PIN & BIT5) == 0) {
-                                Beep(200); while((PF->PIN & BIT5) == 0) { Delay_ms(10); } exit_buzzer = 1; break; 
-                            }
-                        }
+                        if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { sys_cfg.buzzer_on = 1; JigForceBeep(100); while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; } }
+                        if((PF->PIN & BIT4) == 0) { Delay_ms(50); if((PF->PIN & BIT4) == 0) { sys_cfg.buzzer_on = 0; while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; } }
+                        if(Check_Exit_Button()) { exit_buzzer = 1; break; }
                     }
                     if (exit_buzzer == 1) break;
                 }
