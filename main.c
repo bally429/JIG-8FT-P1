@@ -1,24 +1,15 @@
 /*
  * ===========================================================================================
- * Project: JIG-8FT-P1 _WIFIBLE (M031 端主程式 - 純讀卡機測試版)
+ * Project: JIG-8FT-P1 _WIFIBLE (M031 端主程式 - 穩健起點版)
  * MCU: Nuvoton M032SE3AE
- * ESP32: ESPWM32EN1
  * OLED: 3.2inch 256x64 mono white OLED Module (SSD1322)
  * RTC: RV-3028-C7
  * PowerMonitor: INA237 I2C Interface
- * 目前版本：v5.0 (2026/06/22)
- * 修改版本List 如下:
- * v4.3 (202606190200) 
- * 1.重構 OLED.c 導入 8KB Frame Buffer (OLED_GRAM) 雙緩衝機制，澈底消除畫面閃爍。
- * v4.4.1 (202606190330)
- * 1.分離「硬體採樣頻率」與「螢幕更新頻率」，新增背景高頻採樣 (每20ms)。
- * v4.9 (202606221630) [蜂鳴器硬體級阻斷升級]
- * 1.將所有發聲函數更名為 JigBeep 與 JigForceBeep，徹底避免與 Keil5 底層衝突。
- * v5.0 (202606221700) [終極系統大重構與完美對稱排版]
- * 1. 大量冗餘代碼重構：將「按鍵偵測」、「背景電流採樣」、「5秒等待過場」與「資料排版渲染」
- * 封裝為獨立的通用模組函數 (Helper Functions)，使主邏輯大幅瘦身 60%，澈底消除複製貼上帶來的 Bug。
- * 2. 精準排版：依據使用者要求，將 OLED 畫面嚴格切分為左右各 16 字元，實現完美對稱的工業儀表質感。
- * 3. 變數防護：蜂鳴器狀態封裝入 sys_cfg 結構體，阻絕幽靈記憶體覆寫現象。
+ * 目前版本：v5.0.4 (2026/06/24) [滾輪選單新增 USBHID 測試]
+ * 1. 繼承系統最穩定的 v5.0.3 基礎架構。
+ * 2. 補回底層 USBD 初始化邏輯與 GPIO 腳位設定 (PA.12, PA.13, PA.14)。
+ * 3. 實作 USB HID 鍵盤字元發送函式，支援大小寫、數字、底線與減號。
+ * 4. 滾輪選單新增 "USBHID TEST" 選項。進入後按紅色鍵(PA.8)發送測試字串，按黃色鍵(PF.5)退出。
  * ===========================================================================================
  */
 
@@ -32,14 +23,28 @@
 #include "RV3028.h"
 
 // =======================================================
+// [治具實體 GPIO 按鍵對應與功能說明]
+// =======================================================
+// 1. PA.8  (SW_Power)     : 電源開關 / 測試觸發 (紅色按鈕 / 電源符號)
+// 2. PF.5  (SW)           : 確定或離開 (黃色按鈕 / 圓形符號)
+// 3. PF.4  (SW_Change)    : 滾輪選單往上移動、數值增加 (綠色按鈕 / "+" 符號)
+// 4. PF.3  (SW_SET)       : 滾輪選單往下移動、數值遞減 (藍色按鈕 / "-" 符號)
+// 5. PF.6  (SW_Interface) : 原本選介面用，目前滾輪選單暫時沒用到 (黑色按鈕 / "CIF" 字樣)
+// 6. PF.14 (SW_Baud rate) : 原本選包率用，目前滾輪選單暫時沒用到 (白色按鈕 / 正方形符號)
+// =======================================================
+
+// =======================================================
 // [系統全域設定與變數]
 // =======================================================
-// 將系統設定包裹於結構體，防止記憶體意外越界覆寫
-typedef struct {
-    uint8_t buzzer_on;
-} SystemConfig_t;
+volatile uint8_t g_u8BuzzerEnabled = 0; 
 
-volatile SystemConfig_t sys_cfg = { .buzzer_on = 0 }; // 預設 0: 開機靜音
+// 滿足 Keil5 專案左側 hid_kb.c 編譯需要的連結變數，作為發送通道 2 的就緒旗標
+volatile uint8_t g_u8EP2Ready = 0; 
+
+// [v5.0.4] 宣告新唐 USB BSP 提供的外部變數與函數
+extern const S_USBD_INFO_T gsInfo;
+extern void HID_ClassRequest(void);
+extern void HID_Init(void);
 
 extern void vCheckingTimeOut(void);
 extern uint8_t g_u8WiegandNum; 
@@ -110,12 +115,11 @@ void Delay_ms(uint32_t ms);
 void Delay_us(uint32_t us); 
 void JigForceBeep(uint32_t ms); 
 void JigBeep(uint32_t ms);      
+void Trigger_RedLight_Alarm(void);
 
 int UART0_Read_Byte(uint8_t *data);
 void UART0_Flush_Rx_Buffer(void);
 void UART1_Flush_Rx_Buffer(void); 
-void Calculate_Checksum(const uint8_t *payload, uint16_t payload_len, char *out_chk);
-int Execute_TR515_Command_With_Retry(const char *tx_payload);
 
 void Interface_init(void); 
 void UART_Monitor_Test(uint32_t u32BaudRate); 
@@ -128,51 +132,38 @@ void Safe_Print_OLED(int y, const char *fmt, ...);
 void Show_RTC_Time_Loop(uint32_t exit_btn_bit, const char* hint_text);
 
 // =======================================================
-// [v5.0 核心共用模組 (Helper Functions)]
+// [核心共用模組 (Helper Functions)]
 // =======================================================
-
-// 1. 處理退出按鍵 (PF.5)
 int Check_Exit_Button(void) {
+    // PF.5 (SW): 確定或離開 (黃色按鈕 / 圓形符號)
     if((PF->PIN & BIT5) == 0) { 
         Delay_ms(50); 
-        if((PF->PIN & BIT5) == 0) { 
-            JigBeep(200); 
-            while((PF->PIN & BIT5)==0){} 
-            return 1; 
-        } 
+        if((PF->PIN & BIT5) == 0) { JigBeep(200); while((PF->PIN & BIT5)==0){} return 1; } 
     }
     return 0;
 }
 
-// 2. 處理重置峰值按鍵 (PF.3)
 int Check_Reset_Button(void) {
+    // PF.3 (SW_SET): 往下移動/遞減 (藍色按鈕 / "-"符號) -> 這裡用作重置電流峰值紀錄
     if((PF->PIN & BIT3) == 0) { 
         Delay_ms(50); 
-        if((PF->PIN & BIT3) == 0) { 
-            JigBeep(50); 
-            g_fMaxCurrent = 0.0f; g_fMinCurrent = 9999.0f; 
-            while((PF->PIN & BIT3)==0){} 
-            return 1; 
-        } 
+        if((PF->PIN & BIT3) == 0) { JigBeep(50); g_fMaxCurrent = 0.0f; g_fMinCurrent = 9999.0f; while((PF->PIN & BIT3)==0){} return 1; } 
     }
     return 0;
 }
 
-// 3. 處理紅鍵電源切換 (PA.8) - 只回傳是否觸發，讓各介面自行決定對應硬體操作
 int Check_Power_Toggle(int *power_state) {
-    if ((PA->PIN & BIT8) == 0) {
+    // PA.8 (SW_Power): 電源開關 (紅色按鈕 / 電源符號)
+    if ((PA->PIN & BIT8) == 0) { 
         Delay_ms(50);
         if ((PA->PIN & BIT8) == 0) {
             *power_state = !(*power_state);
-            while ((PA->PIN & BIT8) == 0) {} 
-            Delay_ms(50);
-            return 1;
+            while ((PA->PIN & BIT8) == 0) {} Delay_ms(50); return 1;
         }
     }
     return 0;
 }
 
-// 4. 背景採樣器 (處理每 20ms 一次的取樣邏輯)
 void Process_Background_Sampling(int power_state, uint32_t loop_tick) {
     if (power_state && (loop_tick % 20 == 0)) {
         float sample_c = getCurrent_mA();
@@ -183,25 +174,22 @@ void Process_Background_Sampling(int power_state, uint32_t loop_tick) {
     }
 }
 
-// 5. 5秒等待與快速跳過畫面
 void Show_Test_Start_Screen(const char* title) {
     OLED_Clear();
     Safe_Print_OLED(0, "%s", title); 
-    Safe_Print_OLED(16, "Red button Power"); 
-    Safe_Print_OLED(32, "Blue button Reset"); 
+    Safe_Print_OLED(16, "Red Btn (Power)"); 
+    Safe_Print_OLED(32, "Blue Btn (-) Reset"); 
     OLED_Update(); 
 
     uint32_t wait_tick = 0;
     while(wait_tick < 5000) {
-        if (Check_Exit_Button()) break; // 偵測到 PF.5 立即跳出等待
-        Delay_ms(10); 
-        wait_tick += 10;
+        if (Check_Exit_Button()) break; // PF.5 黃色按鈕提早離開
+        Delay_ms(10); wait_tick += 10;
     }
     OLED_Clear();
-    Reset_Current_Filter(); // 進入前確保數據乾淨
+    Reset_Current_Filter(); 
 }
 
-// 6. 完美對稱的工業儀表板渲染器
 void Update_Dashboard_Display(int power_state, int rx_count, const char* specific_data_str) {
     float voltage = getBusVoltage_V(); 
     float inst_current = getCurrent_mA();
@@ -210,29 +198,85 @@ void Update_Dashboard_Display(int power_state, int rx_count, const char* specifi
     char l_buf[17], r_buf[17];
     OLED_Clear();
     
-    // [Line 0] AVG vs Max (精準對齊版)
     snprintf(l_buf, 17, "AVG:%.1fmA", g_fCurrentAvg);
     snprintf(r_buf, 17, "Max:%.1fmA", g_fMaxCurrent);
     Safe_Print_OLED(0, "%-16s%s", l_buf, r_buf); 
     
-    // [Line 1] CUR vs Min (精準對齊版)
     snprintf(l_buf, 17, "CUR:%.1fmA", inst_current);
     snprintf(r_buf, 17, "Min:%.0fmA", (g_fMinCurrent==9999.0f)?0:g_fMinCurrent);
     Safe_Print_OLED(16, "%-16s%s", l_buf, r_buf);
     
-    // [Line 2] 電壓與電源狀態
     snprintf(l_buf, 17, "%.2fV", voltage);
-    Safe_Print_OLED(32, "%-16s[Power :%s]", l_buf, power_state?"ON ":"OFF");
+    Safe_Print_OLED(32, "%-16s[Power:%s]", l_buf, power_state?"ON ":"OFF");
     
-    // [Line 3] UART 封包與專屬資料
-    Safe_Print_OLED(48, "%02d/%s", rx_count, specific_data_str); 
+    char r_data[32];
+    snprintf(l_buf, 17, "               "); // 清空掃描機保留位
+    if(strlen(specific_data_str) > 0 && rx_count >= 0) {
+        snprintf(r_data, sizeof(r_data), "%02d/%s", rx_count, specific_data_str);
+    } else {
+        strncpy(r_data, specific_data_str, sizeof(r_data));
+    }
+    snprintf(r_buf, 17, "%s", r_data);
+    Safe_Print_OLED(48, "%-16s%s", l_buf, r_buf); 
     
     OLED_Update(); 
 }
 
+// =======================================================
+// [v5.0.4] USB HID Keyboard 輸出底層函式
+// =======================================================
+int Trigger_USB_HID_Key(uint8_t mod, uint8_t key) {
+    uint8_t report[8] = {0};
+    report[0] = mod;
+    report[2] = key;
+    
+    uint32_t timeout = 0;
+    while(g_u8EP2Ready == 0) {
+        Delay_us(100);
+        timeout++;
+        // 防呆機制：若電腦沒準備好或沒插 USB，等待 50ms 後脫離避免卡死
+        if(timeout > 500) return 0; 
+    }
+    
+    g_u8EP2Ready = 0;
+    // 將鍵盤封包寫入 USB 緩衝區並觸發發送 (EP2 為新唐鍵盤範例發送通道)
+    USBD_MemCopy((uint8_t *)(USBD_BUF_BASE + USBD_GET_EP_BUF_ADDR(EP2)), report, 8);
+    USBD_SET_PAYLOAD_LEN(EP2, 8);
+		
+		return 1; // [修改] 回傳 1 表示成功
+		
+}
+
+
+void Output_String_To_USB_HID(const char* str) {
+    while(*str) {
+        char c = *str;
+        uint8_t mod = 0, key = 0;
+        
+        // 字母 (大寫需加上 Shift 修飾鍵 mod=0x02)
+        if (c >= 'a' && c <= 'z') { key = c - 'a' + 0x04; }
+        else if (c >= 'A' && c <= 'Z') { mod = 0x02; key = c - 'A' + 0x04; } 
+        // 數字
+        else if (c >= '1' && c <= '9') { key = c - '1' + 0x1E; }
+        else if (c == '0') { key = 0x27; }
+        // 特殊符號 (減號、底線)
+        else if (c == '-') { key = 0x2D; }
+        else if (c == '_') { mod = 0x02; key = 0x2D; } // Shift + '-' = '_'
+        else if (c == ' ') { key = 0x2C; }
+        
+        if (key != 0) {
+						// [修改] 如果發送失敗 (Timeout)，立刻中斷整個字串的發送迴圈
+            if (!Trigger_USB_HID_Key(mod, key)) break;  //按下
+            Delay_ms(2);
+            if (!Trigger_USB_HID_Key(0, 0)) break;      //放開
+            Delay_ms(2);
+        }
+        str++;
+    }
+}
 
 // =======================================================
-// [v4.3 終極顯存 UI 引擎 底層函數] 
+// [OLED UI 繪圖底層引擎] 
 // =======================================================
 void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, const char *fmt, ...) {
     char temp_buf[128]; char full_line[33]; va_list argptr;
@@ -257,7 +301,6 @@ void Safe_Print_OLED(int y, const char *fmt, ...) {
 void UI_Draw_Menu_State(const char* title, const char** items, int num_items, int curr_idx) {
     int prev_idx = (curr_idx - 1 + num_items) % num_items;
     int next_idx = (curr_idx + 1) % num_items;
-
     OLED_Clear();
     Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, title);                  
     Safe_Print_OLED_Smooth(16, 16, 63, 0x04, "  %s", items[prev_idx]); 
@@ -320,8 +363,11 @@ void WIFIBLE_ReaderTest_init(void) {
     SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA3MFP_SPI0_SS | SYS_GPA_MFPL_PA2MFP_SPI0_CLK | SYS_GPA_MFPL_PA0MFP_SPI0_MOSI);
     SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB13MFP_Msk | SYS_GPB_MFPH_PB12MFP_Msk);
     SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB13MFP_UART0_TXD | SYS_GPB_MFPH_PB12MFP_UART0_RXD);
+    
+    // UART1 (PB.2 RX, PB.3 TX) - 為 ESP32 預留
     SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB3MFP_Msk | SYS_GPB_MFPL_PB2MFP_Msk);
     SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB3MFP_UART1_TXD | SYS_GPB_MFPL_PB2MFP_UART1_RXD);
+    
     SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB1MFP_Msk | SYS_GPB_MFPL_PB0MFP_Msk);
     SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB1MFP_UART2_TXD | SYS_GPB_MFPL_PB0MFP_UART2_RXD);
 }
@@ -331,14 +377,34 @@ void Setup_GPIO_Modes(void) {
     GPIO_SetMode(PC, BIT1, GPIO_MODE_OUTPUT); GPIO_SetMode(PC, BIT0, GPIO_MODE_OUTPUT); 
     GPIO_SetMode(PD, BIT3, GPIO_MODE_OUTPUT); GPIO_SetMode(PD, BIT15, GPIO_MODE_OUTPUT); 
     GPIO_SetMode(PF, BIT15, GPIO_MODE_OUTPUT); 
-    GPIO_SetMode(PB, BIT0, GPIO_MODE_QUASI); GPIO_SetMode(PA, BIT1, GPIO_MODE_QUASI); 
-    GPIO_SetMode(PD, BIT2, GPIO_MODE_QUASI); GPIO_SetMode(PD, BIT1, GPIO_MODE_QUASI); GPIO_SetMode(PD, BIT0, GPIO_MODE_QUASI); 
+    
+    // 初始化 6 顆主要功能按鍵為輸入模式 (QUASI 模式)
+    GPIO_SetMode(PB, BIT0, GPIO_MODE_QUASI); 
+    GPIO_SetMode(PA, BIT1, GPIO_MODE_QUASI); 
+    GPIO_SetMode(PD, BIT2, GPIO_MODE_QUASI); 
+    GPIO_SetMode(PD, BIT1, GPIO_MODE_QUASI); 
+    GPIO_SetMode(PD, BIT0, GPIO_MODE_QUASI); 
+    
+    // [註解優化] PA.8_SW_Power 紅色按鍵 (電源)
     GPIO_SetMode(PA, BIT8, GPIO_MODE_QUASI);
-    GPIO_SetMode(PF, BIT6, GPIO_MODE_QUASI); GPIO_SetMode(PF, BIT14, GPIO_MODE_QUASI);
-    GPIO_SetMode(PF, BIT5, GPIO_MODE_QUASI); GPIO_SetMode(PF, BIT3, GPIO_MODE_QUASI); GPIO_SetMode(PF, BIT4, GPIO_MODE_QUASI);
+    
+    // [註解優化] PF.6_SW_Interface 黑色按鍵 (CIF) / PF.14_SW_Baud_rate 白色按鍵 (方塊)
+    GPIO_SetMode(PF, BIT6, GPIO_MODE_QUASI); 
+    GPIO_SetMode(PF, BIT14, GPIO_MODE_QUASI);
+    
+    // [註解優化] PF.5_SW 黃色按鍵 (圓形/確認) / PF.4_SW_Change 綠色按鍵 (+) / PF.3_SW_SET 藍色按鍵 (-)
+    GPIO_SetMode(PF, BIT5, GPIO_MODE_QUASI); 
+    GPIO_SetMode(PF, BIT3, GPIO_MODE_QUASI); 
+    GPIO_SetMode(PF, BIT4, GPIO_MODE_QUASI);
+    
     GPIO_SetMode(PC, BIT7, GPIO_MODE_OUTPUT); PC->DOUT &= ~BIT7; 
     PD->DOUT |= BIT15; PF->DOUT |= BIT15; PC->DOUT |= BIT1;  PD->DOUT |= BIT3;  PA->DOUT |= BIT8;
     PF->DOUT |= (BIT6 | BIT14 | BIT5 | BIT3 | BIT4);
+
+    // [v5.0.4] USB 腳位初始化 (PA.12 VBUS, PA.13 D-, PA.14 D+)
+    // 使用絕對數值 (14ul) 避開不同版本 BSP 巨集名稱的歧異
+    SYS->GPA_MFPH &= ~(SYS_GPA_MFPH_PA12MFP_Msk | SYS_GPA_MFPH_PA13MFP_Msk | SYS_GPA_MFPH_PA14MFP_Msk);
+    SYS->GPA_MFPH |= ((14ul << SYS_GPA_MFPH_PA12MFP_Pos) | (14ul << SYS_GPA_MFPH_PA13MFP_Pos) | (14ul << SYS_GPA_MFPH_PA14MFP_Pos));
 }
 
 void Interface_init(void){
@@ -351,6 +417,10 @@ void SYS_Init(void) {
     SYS_UnlockReg();
     CLK_EnableXtalRC(CLK_PWRCTL_HIRCEN_Msk); CLK_WaitClockReady(CLK_STATUS_HIRCSTB_Msk);
     CLK_SetHCLK(CLK_CLKSEL0_HCLKSEL_HIRC, CLK_CLKDIV0_HCLK(1));
+    
+    // [v5.0.4] 啟動 USB 模組時脈 (M032 使用內部 HIRC 即可)
+    CLK_EnableModuleClock(USBD_MODULE);
+    
     CLK->AHBCLK |= ((1ul << 0)|(1ul << 1)|(1ul << 2)|(1ul << 3)|(1ul << 5)); 
     CLK_EnableModuleClock(SPI0_MODULE); CLK_EnableModuleClock(I2C0_MODULE); CLK_EnableModuleClock(I2C1_MODULE); 
     CLK_EnableModuleClock(UART0_MODULE); CLK_SetModuleClock(UART0_MODULE, CLK_CLKSEL1_UART0SEL_HIRC, CLK_CLKDIV0_UART0(1));
@@ -358,12 +428,27 @@ void SYS_Init(void) {
     CLK_EnableModuleClock(UART2_MODULE); CLK_SetModuleClock(UART2_MODULE, CLK_CLKSEL3_UART2SEL_HIRC, CLK_CLKDIV4_UART2(1));
     CLK_EnableModuleClock(TMR0_MODULE); CLK_SetModuleClock(TMR0_MODULE, CLK_CLKSEL1_TMR0SEL_HIRC, 0);
     SystemCoreClockUpdate(); WIFIBLE_ReaderTest_init();
-    UART_Open(UART0, 115200); UART0->FIFO = (UART0->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE; UART_EnableInt(UART0, UART_INTEN_RDAIEN_Msk);
-    UART_Open(UART1, 19200); UART1->FIFO |= (UART_FIFO_RXRST_Msk | UART_FIFO_TXRST_Msk);
-    UART_Open(UART2, 9600); UART2->FIFO = (UART2->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE; UART_EnableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
-    I2C_Open(I2C0, 100000); NVIC_EnableIRQ(UART02_IRQn); SYS_LockReg();
+    
+    UART_Open(UART0, 115200); 
+    UART0->FIFO = (UART0->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE; 
+    UART_EnableInt(UART0, UART_INTEN_RDAIEN_Msk);
+    
+    // UART1 基礎初始化 115200 (暫不開啟中斷，作為 v5.0 的純粹環境)
+    UART_Open(UART1, 115200); 
+    UART1->FIFO = (UART1->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE;
+    
+    UART_Open(UART2, 9600); 
+    UART2->FIFO = (UART2->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE; 
+    UART_EnableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
+    
+    I2C_Open(I2C0, 100000); 
+    NVIC_EnableIRQ(UART02_IRQn); 
+    SYS_LockReg();
 }
 
+// =======================================================
+// [中斷處理模組]
+// =======================================================
 void UART02_IRQHandler(void) {
     if(UART_GET_INT_FLAG(UART0, UART_INTSTS_RDAINT_Msk)) {
         while(!UART_GET_RX_EMPTY(UART0)) {
@@ -398,6 +483,12 @@ void UART1_Flush_Rx_Buffer(void) {
 void Delay_us(uint32_t us) { CLK_SysTickDelay(us); }
 void Delay_ms(uint32_t ms) { while (ms >= 100) { TIMER_Delay(TIMER0, 100 * 1000); ms -= 100; } if (ms > 0) TIMER_Delay(TIMER0, ms * 1000); }
 
+void OLED_Force_Reset(void) { 
+    PD->DOUT |= BIT15; Delay_ms(50); 
+    PD->DOUT &= ~BIT15; Delay_ms(200); 
+    PD->DOUT |= BIT15; Delay_ms(200); 
+}
+
 // =======================================================
 // [音訊分流系統]
 // =======================================================
@@ -407,7 +498,7 @@ void JigForceBeep(uint32_t ms) {
 }
 
 void JigBeep(uint32_t ms) {
-    if (sys_cfg.buzzer_on == 1) { // 嚴格檢查硬體結構體狀態
+    if (g_u8BuzzerEnabled == 1) { 
         JigForceBeep(ms);
     }
 }
@@ -417,8 +508,6 @@ void Trigger_RedLight_Alarm(void) {
     OLED_Clear(); Safe_Print_OLED(16, "COMM ERROR ALARM"); OLED_Update();
     while(1) { JigForceBeep(500); Delay_ms(500); }
 }
-
-void OLED_Force_Reset(void) { PD->DOUT |= BIT15; Delay_ms(50); PD->DOUT &= ~BIT15; Delay_ms(200); PD->DOUT |= BIT15; Delay_ms(200); }
 
 void Show_RTC_Time_Loop(uint32_t exit_btn_bit, const char* hint_text) {
     RTC_TimeTypeDef current_time; 
@@ -431,6 +520,7 @@ void Show_RTC_Time_Loop(uint32_t exit_btn_bit, const char* hint_text) {
         Safe_Print_OLED(48, hint_text);
         OLED_Update(); 
         
+        // 使用 PF.5 黃色按鈕離開
         if((PF->PIN & exit_btn_bit) == 0) { 
             Delay_ms(50); 
             if((PF->PIN & exit_btn_bit) == 0) { 
@@ -443,34 +533,8 @@ void Show_RTC_Time_Loop(uint32_t exit_btn_bit, const char* hint_text) {
     }
 }
 
-void Calculate_Checksum(const uint8_t *payload, uint16_t payload_len, char *out_chk) {
-    uint16_t sum = 0; for (uint16_t i = 0; i < payload_len; i++) { sum += payload[i]; }
-    sprintf(out_chk, "%02X", (uint8_t)(sum & 0xFF));
-}
-
-int Execute_TR515_Command_With_Retry(const char *tx_payload) {
-    uint8_t retry_count = 0; const uint8_t MAX_RETRIES = 3; uint8_t tx_buffer[128]; char chk_str[3];
-    Calculate_Checksum((const uint8_t*)tx_payload, strlen(tx_payload), chk_str); sprintf((char*)tx_buffer, "%c%s%s%c", CMD_STX, tx_payload, chk_str, CMD_CR);
-    while (retry_count < MAX_RETRIES) {
-        UART1_Flush_Rx_Buffer(); char *ptr = (char*)tx_buffer; while(*ptr) { while(UART_IS_TX_FULL(UART1)) {} UART_WRITE(UART1, *ptr++); }
-        uint32_t timeout = 0; char rx_buffer[128]; int rx_idx = 0; int packet_complete = 0;
-        while(timeout < 1000) { 
-            if((UART1->FIFOSTS & UART_FIFOSTS_RXEMPTY_Msk) == 0) {
-                char c = UART_READ(UART1);
-                if(c == CMD_STX) { rx_idx = 0; continue; }
-                if(c == CMD_CR) { rx_buffer[rx_idx] = '\0'; packet_complete = 1; break; }
-                if(rx_idx < 127) rx_buffer[rx_idx++] = c;
-            } else { Delay_ms(1); timeout++; }
-        }
-        if (packet_complete) {
-            if (rx_buffer[0] == 'A') return 0; 
-            else if (rx_buffer[0] == 'N') { if (strncmp((char *)rx_buffer, "N04", 3) == 0) { retry_count++; Delay_ms(10); continue; } else { return -1; } }
-        } else { retry_count++; }
-    } Trigger_RedLight_Alarm(); return -1;
-}
-
 // =======================================================
-// [測試介面 1] UART2 監控 (v5.0 瘦身重構版)
+// [測試介面 1] UART2 監控
 // =======================================================
 void UART_Monitor_Test(uint32_t u32BaudRate) {
     UART_DisableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
@@ -479,7 +543,7 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
     UART_EnableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
     
     char title_buf[32]; snprintf(title_buf, sizeof(title_buf), "UART2 Mntr %u", u32BaudRate);
-    Show_Test_Start_Screen(title_buf); // 呼叫共用的等待與跳過畫面模組
+    Show_Test_Start_Screen(title_buf); 
 
     int rx_count = 0; char rx_buf[128] = {0}; uint32_t loop_tick = 1000; int power_state = 0;
 
@@ -520,7 +584,7 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
 }
 
 // =======================================================
-// [測試介面 2] Wiegand 監控 (v5.0 瘦身重構版)
+// [測試介面 2] Wiegand 監控 
 // =======================================================
 void Wiegand_Monitor_Test(void) {
     Interface_init(); PB6 = 1; PA11 = 1; 
@@ -579,7 +643,7 @@ void Decode_TK2_Raw(char* out_str) {
 }
 
 // =======================================================
-// [測試介面 3] TK2 監控 (v5.0 瘦身重構版)
+// [測試介面 3] TK2 監控
 // =======================================================
 void TK2_Monitor_Test(void) {
     Interface_init(); PB7 = 1; PA11 = 1; 
@@ -636,6 +700,16 @@ void TK2_Monitor_Test(void) {
 int main(void) {
     SYS_Init();
     Setup_GPIO_Modes();
+    
+    // 等待硬體穩定，防冷開機 OLED 黑屏
+    Delay_ms(500); 
+    
+    // [v5.0.4] 啟動 USBD 功能，完成電腦端枚舉 (Enumeration)
+    USBD_Open(&gsInfo, HID_ClassRequest, NULL);
+    HID_Init();
+    NVIC_EnableIRQ(USBD_IRQn);
+    USBD_Start();
+    
     OLED_Force_Reset();
     vOLED_INIT();
     vINA237_Init();
@@ -650,8 +724,8 @@ int main(void) {
     JigBeep(500); Delay_ms(100); JigBeep(500); 
     Delay_ms(1000);
     
-    // 主選單
-    const char *menu_items[] = { "RS232 Monitor", "Wiegand", "TK2", "What's the time?", "Buzzer Settings" };
+    // 主選單 (加入第 6 個選項)
+    const char *menu_items[] = { "RS232 Monitor", "Wiegand", "TK2", "What's the time?", "Buzzer Settings", "USBHID TEST" };
     const int NUM_ITEMS = sizeof(menu_items) / sizeof(menu_items[0]);
     int current_idx = 1; 
 
@@ -664,6 +738,7 @@ int main(void) {
         int selected = 0;
 
         while(1) {
+            // 監聽 PF.3 (SW_SET): 藍色按鈕 / "-"符號 -> 往下捲動選單
             if((PF->PIN & BIT3) == 0) { 
                 Delay_ms(50);
                 if((PF->PIN & BIT3) == 0) {
@@ -672,6 +747,8 @@ int main(void) {
                     while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; 
                 }
             }
+            
+            // 監聽 PF.4 (SW_Change): 綠色按鈕 / "+"符號 -> 往上捲動選單
             if((PF->PIN & BIT4) == 0) { 
                 Delay_ms(50);
                 if((PF->PIN & BIT4) == 0) {
@@ -680,6 +757,8 @@ int main(void) {
                     while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; 
                 }
             }
+            
+            // 監聽 PF.5 (SW): 黃色按鈕 / 圓形符號 -> 確認進入選項
             if((PF->PIN & BIT5) == 0) { 
                 Delay_ms(50);
                 if((PF->PIN & BIT5) == 0) {
@@ -704,24 +783,69 @@ int main(void) {
             } 
             else if (current_idx == 1) { Wiegand_Monitor_Test(); } 
             else if (current_idx == 2) { TK2_Monitor_Test(); } 
-            else if (current_idx == 3) { 
-                Show_RTC_Time_Loop(BIT5, "     Yellow button > Back"); 
-            }
+            else if (current_idx == 3) { Show_RTC_Time_Loop(BIT5, "    Yellow(Exit) > Back"); }
             else if (current_idx == 4) { 
                 int exit_buzzer = 0;
                 while(1) {
                     OLED_Clear(); Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "Buzzer Settings");
-                    if (sys_cfg.buzzer_on) Safe_Print_OLED_Smooth(16, 16, 63, 0x0F, "  Current: ON ");
+                    if (g_u8BuzzerEnabled) Safe_Print_OLED_Smooth(16, 16, 63, 0x0F, "  Current: ON ");
                     else Safe_Print_OLED_Smooth(16, 16, 63, 0x04, "  Current: OFF");
-                    Safe_Print_OLED_Smooth(32, 16, 63, 0x08, " PF.3 -> Turn ON"); Safe_Print_OLED_Smooth(48, 16, 63, 0x08, " PF.4 -> Turn OFF");
+                    
+                    // 優化 OLED 提示對應顏色與符號
+                    Safe_Print_OLED_Smooth(32, 16, 63, 0x08, " Blue(-) -> Turn ON"); 
+                    Safe_Print_OLED_Smooth(48, 16, 63, 0x08, " Green(+) -> Turn OFF");
                     OLED_Update();
                     
                     while(1) {
-                        if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { sys_cfg.buzzer_on = 1; JigForceBeep(100); while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; } }
-                        if((PF->PIN & BIT4) == 0) { Delay_ms(50); if((PF->PIN & BIT4) == 0) { sys_cfg.buzzer_on = 0; while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; } }
+                        // PF.3 (SW_SET): 藍色按鈕 / "-"符號 -> 打開蜂鳴器
+                        if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { g_u8BuzzerEnabled = 1; JigForceBeep(100); while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; } }
+                        
+                        // PF.4 (SW_Change): 綠色按鈕 / "+"符號 -> 關閉蜂鳴器
+                        if((PF->PIN & BIT4) == 0) { Delay_ms(50); if((PF->PIN & BIT4) == 0) { g_u8BuzzerEnabled = 0; while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; } }
+                        
+                        // PF.5 (SW): 黃色按鈕 / 圓形符號 -> 離開
                         if(Check_Exit_Button()) { exit_buzzer = 1; break; }
                     }
                     if (exit_buzzer == 1) break;
+                }
+            }
+            else if (current_idx == 5) {
+                // [v5.0.4] 新增的 USBHID 獨立測試區塊
+                int exit_usb_test = 0;
+                while(1) {
+                    OLED_Clear();
+                    Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "USBHID TEST");
+                    Safe_Print_OLED_Smooth(16, 16, 63, 0x0A, " Red Btn(Power) -> Send");
+                    Safe_Print_OLED_Smooth(32, 16, 63, 0x0A, " Yellow(Exit)   -> Back");
+                    OLED_Update();
+                    
+                    while(1) {
+                        // 監聽 PA.8 紅色按鍵發送字串
+                        if((PA->PIN & BIT8) == 0) { 
+                            Delay_ms(50); 
+                            if((PA->PIN & BIT8) == 0) { 
+                                JigForceBeep(100); 
+                                OLED_Clear();
+                                Safe_Print_OLED_Smooth(16, 16, 63, 0x0F, " Sending via USB...");
+                                OLED_Update();
+                                
+                                // 發送自定義測試字串
+                                Output_String_To_USB_HID("BALLY-chou_test_0429");
+                                
+                                OLED_Clear();
+                                Safe_Print_OLED_Smooth(16, 16, 63, 0x0F, " Send Success!");
+                                OLED_Update();
+                                Delay_ms(1000);
+                                
+                                while((PA->PIN & BIT8) == 0) { Delay_ms(10); } 
+                                break; // 跳出重新刷選單畫面
+                            } 
+                        }
+                        
+                        // 監聽 PF.5 黃色按鍵離開
+                        if(Check_Exit_Button()) { exit_usb_test = 1; break; }
+                    }
+                    if (exit_usb_test == 1) break;
                 }
             }
         }
