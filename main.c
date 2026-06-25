@@ -5,11 +5,10 @@
  * OLED: 3.2inch 256x64 mono white OLED Module (SSD1322)
  * RTC: RV-3028-C7
  * PowerMonitor: INA237 I2C Interface
- * 目前版本：v5.0.4 (2026/06/24) [滾輪選單新增 USBHID 測試]
- * 1. 繼承系統最穩定的 v5.0.3 基礎架構。
- * 2. 補回底層 USBD 初始化邏輯與 GPIO 腳位設定 (PA.12, PA.13, PA.14)。
- * 3. 實作 USB HID 鍵盤字元發送函式，支援大小寫、數字、底線與減號。
- * 4. 滾輪選單新增 "USBHID TEST" 選項。進入後按紅色鍵(PA.8)發送測試字串，按黃色鍵(PF.5)退出。
+ * 目前版本：v5.0.5 (2026/06/25) [滾輪選單新增 UART1 測試]
+ * 1.TXRX通訊正常02頭 0D結尾
+ * 2.\02\52\65\63\65\69\76\65\64\20\4F\56\45\52\38\33\0D 
+ * 3.尚未規劃通訊協定Communications protocol
  * ===========================================================================================
  */
 
@@ -40,6 +39,18 @@ volatile uint8_t g_u8BuzzerEnabled = 0;
 
 // 滿足 Keil5 專案左側 hid_kb.c 編譯需要的連結變數，作為發送通道 2 的就緒旗標
 volatile uint8_t g_u8EP2Ready = 0; 
+
+// =======================================================
+// [UART1 Ring Buffer 設定]
+// =======================================================
+#define UART1_RX_BUF_SIZE 256
+volatile uint8_t g_u1_rx_buf[UART1_RX_BUF_SIZE];
+volatile uint16_t g_u1_rx_head = 0;
+volatile uint16_t g_u1_rx_tail = 0;
+
+// 定義 TR515 通訊協定字元
+#define TR515_STX 0x02
+#define TR515_CR  0x0D
 
 // [v5.0.4] 宣告新唐 USB BSP 提供的外部變數與函數
 extern const S_USBD_INFO_T gsInfo;
@@ -222,6 +233,60 @@ void Update_Dashboard_Display(int power_state, int rx_count, const char* specifi
     OLED_Update(); 
 }
 
+
+// UART1 讀取單個字元
+int UART1_Read_Byte(uint8_t *data) {
+    if (g_u1_rx_head == g_u1_rx_tail) return 0;
+    *data = g_u1_rx_buf[g_u1_rx_tail]; 
+    g_u1_rx_tail = (g_u1_rx_tail + 1) % UART1_RX_BUF_SIZE; 
+    return 1;
+}
+
+// 簡單的 UART1 發送字串函式
+void UART1_Send_String(const char* str) {
+    while(*str) {
+        UART_WRITE(UART1, *str++);
+        while(UART1->FIFOSTS & UART_FIFOSTS_TXFULL_Msk); // 等待TX FIFO緩衝區有空間
+    }
+}
+
+// Command Handler：處理驗證過的 TR515 指令
+void TR515_Command_Handler(const char* cmd) {
+    JigBeep(100); // 接收成功嗶一聲
+    OLED_Clear();
+    Safe_Print_OLED(0, "--- UART1 RX ---");
+    Safe_Print_OLED(16, "Format: TR515");
+    Safe_Print_OLED(32, "Cmd: %s", cmd);
+    OLED_Update();
+}
+
+// Parser：處理 Ring Buffer，過濾 STX 與 CR
+void Process_UART1_TR515_Parser(void) {
+    static uint8_t rx_packet[64];
+    static uint8_t rx_idx = 0;
+    static uint8_t is_stx_received = 0;
+    uint8_t c;
+
+    while(UART1_Read_Byte(&c)) {
+        if (c == TR515_STX) {
+            is_stx_received = 1;
+            rx_idx = 0; // 重置指標，開始接收新封包
+        } 
+        else if (c == TR515_CR && is_stx_received) {
+            rx_packet[rx_idx] = '\0'; // 補上字串結尾
+            TR515_Command_Handler((char*)rx_packet); // 呼叫 Handler
+            is_stx_received = 0; // 完成一次封包，重置狀態
+        } 
+        else if (is_stx_received) {
+            if (rx_idx < sizeof(rx_packet) - 1) {
+                rx_packet[rx_idx++] = c;
+            } else {
+                // 防呆：超過緩衝區長度，捨棄異常封包
+                is_stx_received = 0; 
+            }
+        }
+    }
+}
 // =======================================================
 // [v5.0.4] USB HID Keyboard 輸出底層函式
 // =======================================================
@@ -433,9 +498,15 @@ void SYS_Init(void) {
     UART0->FIFO = (UART0->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE; 
     UART_EnableInt(UART0, UART_INTEN_RDAIEN_Msk);
     
-    // UART1 基礎初始化 115200 (暫不開啟中斷，作為 v5.0 的純粹環境)
+		// 原本的程式碼：
     UART_Open(UART1, 115200); 
     UART1->FIFO = (UART1->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE;
+    
+    // 【請補上這兩行來開啟中斷】：開啟 UART1 中斷
+    UART_EnableInt(UART1, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
+    
+    // 【修改這裡】M031 必須使用 UART13_IRQn
+    NVIC_EnableIRQ(UART13_IRQn);
     
     UART_Open(UART2, 9600); 
     UART2->FIFO = (UART2->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE; 
@@ -449,6 +520,29 @@ void SYS_Init(void) {
 // =======================================================
 // [中斷處理模組]
 // =======================================================
+void UART13_IRQHandler(void) {
+    uint32_t u32IntSts = UART1->INTSTS;
+    uint32_t u32FIFOSts = UART1->FIFOSTS;
+    
+    // [優化] 多加了 UART_FIFOSTS_BIF_Msk (Break Interrupt)，防止傳輸線雜訊引發中斷卡死
+    if(u32FIFOSts & (UART_FIFOSTS_FEF_Msk | UART_FIFOSTS_PEF_Msk | UART_FIFOSTS_BIF_Msk | UART_FIFOSTS_RXOVIF_Msk)) { 
+        UART1->FIFOSTS = (UART_FIFOSTS_FEF_Msk | UART_FIFOSTS_PEF_Msk | UART_FIFOSTS_BIF_Msk | UART_FIFOSTS_RXOVIF_Msk); 
+    }
+    
+    if(u32IntSts & (UART_INTSTS_RDAINT_Msk | UART_INTSTS_RXTOINT_Msk)) {
+        while((UART1->FIFOSTS & UART_FIFOSTS_RXEMPTY_Msk) == 0) {
+            uint8_t c = UART_READ(UART1);
+            uint16_t next_head = (g_u1_rx_head + 1) % UART1_RX_BUF_SIZE;
+            
+            // 就算在主選單沒有人去收資料 (Buffer 滿了)，這裡也會把硬體 FIFO 讀空丟棄，不會卡當
+            if (next_head != g_u1_rx_tail) { 
+                g_u1_rx_buf[g_u1_rx_head] = c; 
+                g_u1_rx_head = next_head; 
+            }
+        }
+    }
+}
+
 void UART02_IRQHandler(void) {
     if(UART_GET_INT_FLAG(UART0, UART_INTSTS_RDAINT_Msk)) {
         while(!UART_GET_RX_EMPTY(UART0)) {
@@ -466,6 +560,53 @@ void UART02_IRQHandler(void) {
             uint16_t next_head = (g_u2_rx_head + 1) % UART2_RX_BUF_SIZE;
             if (next_head != g_u2_rx_tail) { g_u2_rx_buf[g_u2_rx_head] = c; g_u2_rx_head = next_head; }
         }
+    }
+}
+
+void UART1_TR515_Test(void) {
+    int power_state = 0;
+    OLED_Clear();
+    Safe_Print_OLED(0, "UART1 TR515 Test");
+    Safe_Print_OLED(16, "Red(PA8): TX ABCD123");
+    Safe_Print_OLED(32, "Wait RX (abc456)...");
+    Safe_Print_OLED(48, "Yellow(PF5): Exit");
+    OLED_Update();
+    
+    // 清空緩衝區
+    __disable_irq(); g_u1_rx_head = 0; g_u1_rx_tail = 0; __enable_irq();
+
+    while(1) {
+        // 1. 定期呼叫 Parser 處理接收資料
+        Process_UART1_TR515_Parser();
+
+        // 2. 監聽紅色按鍵 (PA.8) 送出資料
+        if ((PA->PIN & BIT8) == 0) { 
+            Delay_ms(50);
+            if ((PA->PIN & BIT8) == 0) {
+                JigForceBeep(50);
+                
+                // 送出 TR515 格式：<STX>ABCD123<CR>
+                UART_WRITE(UART1, TR515_STX);
+                UART1_Send_String("ABCD123");
+                UART_WRITE(UART1, TR515_CR);
+
+                OLED_Clear();
+                Safe_Print_OLED(0, "--- UART1 TX ---");
+                Safe_Print_OLED(16, "Sent: ABCD123");
+                OLED_Update();
+                
+                while ((PA->PIN & BIT8) == 0); // 等待按鍵放開
+                Delay_ms(1000); // 顯示一秒後恢復畫面
+                
+                OLED_Clear();
+                Safe_Print_OLED(0, "UART1 TR515 Test");
+                Safe_Print_OLED(16, "Ready...");
+                OLED_Update();
+            }
+        }
+
+        // 3. 監聽黃色按鍵 (PF.5) 離開
+        if(Check_Exit_Button()) break;
     }
 }
 
@@ -724,9 +865,9 @@ int main(void) {
     JigBeep(500); Delay_ms(100); JigBeep(500); 
     Delay_ms(1000);
     
-    // 主選單 (加入第 6 個選項)
-    const char *menu_items[] = { "RS232 Monitor", "Wiegand", "TK2", "What's the time?", "Buzzer Settings", "USBHID TEST" };
-    const int NUM_ITEMS = sizeof(menu_items) / sizeof(menu_items[0]);
+// ---主選單定義，修改為 7 個選項 ---
+    const char *menu_items[] = { "RS232 Monitor", "Wiegand", "TK2", "What's the time?", "Buzzer Settings", "USBHID TEST", "UART1 TR515" };
+    const int NUM_ITEMS = sizeof(menu_items) / sizeof(menu_items[0]); // 自動計算為 7
     int current_idx = 1; 
 
     const char *baud_items[] = { "115200, N, 8, 1", "9600, N, 8, 1", "19200, N, 8, 1", "38400, N, 8, 1" };
@@ -847,6 +988,10 @@ int main(void) {
                     }
                     if (exit_usb_test == 1) break;
                 }
+            }
+						else if (current_idx == 6) {
+                // 執行新增的 UART1 獨立測試函式
+                UART1_TR515_Test();
             }
         }
     }
