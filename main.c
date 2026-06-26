@@ -15,7 +15,7 @@
  * 7. 測試abc456  指令\02\30\31\61\62\63\34\35\36\32\36\0D
  * 8. 標準通訊協定 (ASCII Protocol) [STX] [Command] [Data] [Checksum] [CR]
 ●	[STX]: 起始碼，固定為 0x02 (Hex)。
-●	[Command]: 指令碼。
+●	[Command]: 指令碼 兩個字母，如\53\43、SC就是SCanner。
 ●	[Data]: 夾帶資料字串，長度不定（可為空）。
 ●	[Checksum]: 檢查碼。計算 Command + Data 所有字元的 ASCII 總和，取低 8 位元 (00~FF)，轉為 2 個大寫的 Hex 字元 (例如 "B4")。
 ●	[CR]: 結束碼，固定為 0x0D (Hex)。
@@ -151,6 +151,7 @@ void Decode_TK2_Raw(char* out_str);
 void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, const char *fmt, ...);
 void Safe_Print_OLED(int y, const char *fmt, ...);
 void Show_RTC_Time_Loop(uint32_t exit_btn_bit, const char* hint_text);
+void Output_String_To_USB_HID(const char* str); // <--- 在這裡補上這行
 
 // =======================================================
 // [核心共用模組 (Helper Functions)]
@@ -290,15 +291,38 @@ void JIG_8CP_Send_Packet(const char* cmd_code, const char* data) {
     UART_WRITE(UART1, JIG_8CP_CR);
 }
 
-// Command Handler：處理驗證過的 JIG_8CP 指令
+// [分流器] 根據不同的 Cmd Code 執行對應動作
+volatile uint8_t g_u8UsbBusy = 0; // 改個名字比較好辨識
+
 void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
-    JigBeep(100); 
-    OLED_Clear();
-    Safe_Print_OLED(0,  "--- JIG_8CP RX ---");
-    Safe_Print_OLED(16, "Cmd : %s", cmd_code);
-    Safe_Print_OLED(32, "Data: %s", data);
-    Safe_Print_OLED(48, "Yellow(Exit) -> Back");
-    OLED_Update();
+    JigBeep(50); 
+    
+    if (strcmp(cmd_code, "SC") == 0) {
+        // 檢查是否正在處理上一個 USBHID 發送任務
+        if (g_u8UsbBusy) return; 
+
+        OLED_Clear();
+        Safe_Print_OLED(0,  "--- JIG_8CP ROUTE ---");
+        Safe_Print_OLED(16, "Action: USB HID");
+        Safe_Print_OLED(32, "Data  : %s", data);
+        OLED_Update();
+        
+        g_u8UsbBusy = 1; // 進入忙碌狀態
+        
+        // 強制就緒標誌，並嘗試輸出
+        g_u8EP2Ready = 1; 
+        Output_String_To_USB_HID(data);
+        
+        g_u8UsbBusy = 0; // 恢復閒置狀態
+    }
+    else {
+        // 其他指令處理...
+        OLED_Clear();
+        Safe_Print_OLED(0,  "--- JIG_8CP INFO ---");
+        Safe_Print_OLED(16, "Cmd : %s", cmd_code);
+        Safe_Print_OLED(32, "Data: %s", data);
+        OLED_Update();
+    }
 }
 
 // Parser：處理 Ring Buffer，使用正確的 SUM Checksum 進行驗證
@@ -382,26 +406,43 @@ int Trigger_USB_HID_Key(uint8_t mod, uint8_t key) {
 void Output_String_To_USB_HID(const char* str) {
     while(*str) {
         char c = *str;
-        uint8_t mod = 0, key = 0;
+        uint8_t mod = 0; // 0x02 = Shift
+        uint8_t key = 0; // 鍵盤 Scan Code
+
+        // 建立 ASCII 到 HID Scan Code 的對應
+        // HID Scan Code 對照: 'a'是0x04, 'b'是0x05 ... 'z'是0x1D
         
-        if (c >= 'a' && c <= 'z') { key = c - 'a' + 0x04; }
-        else if (c >= 'A' && c <= 'Z') { mod = 0x02; key = c - 'A' + 0x04; } 
+        // 處理小寫字母 (a-z)
+        if (c >= 'a' && c <= 'z') {
+            mod = 0x00; // 不加 Shift
+            key = c - 'a' + 0x04;
+        }
+        // 處理大寫字母 (A-Z)
+        else if (c >= 'A' && c <= 'Z') {
+            mod = 0x02; // 強制按下 Shift
+            key = c - 'A' + 0x04;
+        }
+        // 處理數字 (1-9)
         else if (c >= '1' && c <= '9') { key = c - '1' + 0x1E; }
         else if (c == '0') { key = 0x27; }
+        // 處理特殊符號 (視您的需求擴充)
         else if (c == '-') { key = 0x2D; }
-        else if (c == '_') { mod = 0x02; key = 0x2D; } 
+        else if (c == '_') { mod = 0x02; key = 0x2D; } // Shift + '-'
         else if (c == ' ') { key = 0x2C; }
         
+        // 發送邏輯
         if (key != 0) {
-            if (!Trigger_USB_HID_Key(mod, key)) break;  
+            // 1. 按下按鍵 (包含 Mod 修飾鍵)
+            if (!Trigger_USB_HID_Key(mod, key)) break;
             Delay_ms(2);
-            if (!Trigger_USB_HID_Key(0, 0)) break;      
+            
+            // 2. 放開按鍵 (送出全 0)
+            if (!Trigger_USB_HID_Key(0, 0)) break;
             Delay_ms(2);
         }
         str++;
     }
 }
-
 // =======================================================
 // [OLED UI 繪圖底層引擎] 
 // =======================================================
@@ -627,30 +668,26 @@ void UART1_JIG_8CP_Test(void) {
 
         if ((PA->PIN & BIT8) == 0) { 
             Delay_ms(50);
-            if ((PA->PIN & BIT8) == 0) {
-                JigForceBeep(50);
-                
-                // 發送標準封包：Cmd="10", Data="ABCD123"
-                // '1'+'0'+'A'+'B'+'C'+'D'+'1'+'2'+'3' -> 累加總和 = 0x020E -> Checksum = "0E"
-                JIG_8CP_Send_Packet("10", "ABCD123");
+						// 在 UART1_JIG_8CP_Test 迴圈內，修改紅色鍵發送邏輯
+						if ((PA->PIN & BIT8) == 0) { 
+								Delay_ms(50);
+								if ((PA->PIN & BIT8) == 0) {
+										JigForceBeep(50);
+										
+										// 發送測試：指令 "SC"，資料 "ABCD123"
+										// 函式會自動處理：STX + "SC" + "ABCD123" + Checksum + CR
+										JIG_8CP_Send_Packet("SC", "ABCD123");
 
-                OLED_Clear();
-                Safe_Print_OLED(0, "--- JIG_8CP TX ---");
-                Safe_Print_OLED(16, "Cmd : 10");
-                Safe_Print_OLED(32, "Data: ABCD123");
-                Safe_Print_OLED(48, "Chk : 0E (SUM-Auto)");
-                OLED_Update();
-                
-                while ((PA->PIN & BIT8) == 0); 
-                Delay_ms(1500); 
-                
-                OLED_Clear();
-                Safe_Print_OLED(0, "UART1 JIG_8CP");
-                Safe_Print_OLED(16, "Red Btn -> TX");
-                Safe_Print_OLED(32, "Wait RX Cmd:01...");
-                Safe_Print_OLED(48, "Yellow(Exit)->Back");
-                OLED_Update();
-            }
+										OLED_Clear();
+										Safe_Print_OLED(0, "--- JIG_8CP TX ---");
+										Safe_Print_OLED(16, "Cmd : SC (HID)");
+										Safe_Print_OLED(32, "Data: ABCD123");
+										OLED_Update();
+										
+										while ((PA->PIN & BIT8) == 0); // 等待按鍵放開
+										Delay_ms(1000);
+								}
+						}
         }
 
         if(Check_Exit_Button()) break;
