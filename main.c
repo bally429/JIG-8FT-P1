@@ -5,8 +5,8 @@
  * OLED: 3.2inch 256x64 mono white OLED Module (SSD1322)
  * RTC: RV-3028-C7
  * PowerMonitor: INA237 I2C Interface
- * 目前版本：v5.0.5 (2026/06/25) [UART1 修正為標準 SUM Checksum 與更名 JIG_8CP]
- * 1. 繼承系統最穩定的 v5.0.3 基礎架構。
+ * 目前版本：v5.0.6 (2026/06/25) [UART1 修正為標準 SUM Checksum 與更名 JIG_8CP]
+ * 1. 繼承系統最穩定的 v5.0. 基礎架構。
  * 2. 補回底層 USBD 初始化邏輯與 GPIO 腳位設定 (PA.12, PA.13, PA.14)。
  * 3. 實作 USB HID 鍵盤字元發送函式，支援大小寫、數字、底線與減號。
  * 4. 滾輪選單新增 USBHID TEST 選項。進入後按紅色鍵(PA.8)發送測試字串，按黃色鍵(PF.5)退出。
@@ -19,6 +19,9 @@
 ●	[Data]: 夾帶資料字串，長度不定（可為空）。
 ●	[Checksum]: 檢查碼。計算 Command + Data 所有字元的 ASCII 總和，取低 8 位元 (00~FF)，轉為 2 個大寫的 Hex 字元 (例如 "B4")。
 ●	[CR]: 結束碼，固定為 0x0D (Hex)。
+
+ * V5.0.5 (2026/06/25) - 原 v5.0.3 基礎，修正 UART1 為標準 SUM Checksum，更名 JIG_8CP
+ * V5.0.6 (2026/06/29) - [範例] 修正 USB HID 在特定介面下觸發重啟的 Bug (熱插拔保護)
  *===========================================================================================
  */
 
@@ -447,7 +450,8 @@ void Output_String_To_USB_HID(const char* str) {
 // [OLED UI 繪圖底層引擎] 
 // =======================================================
 void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, const char *fmt, ...) {
-    char temp_buf[128]; char full_line[33]; va_list argptr;
+    static char temp_buf[128]; 
+		static char full_line[33]; va_list argptr;
     va_start(argptr, fmt); vsnprintf(temp_buf, sizeof(temp_buf), fmt, argptr); va_end(argptr);
     int temp_len = strlen(temp_buf);
     for(int i = 0; i < 32; i++) {
@@ -733,25 +737,112 @@ void Trigger_RedLight_Alarm(void) {
 }
 
 void Show_RTC_Time_Loop(uint32_t exit_btn_bit, const char* hint_text) {
-    RTC_TimeTypeDef current_time; 
+    RTC_TimeTypeDef current_time;
+    RTC_TimeTypeDef edit_time;
+    int mode = 0; // 0=觀看, 1=年, 2=月, 3=日, 4=時, 5=分, 6=秒
+    uint32_t blink_timer = 0;
+    int show_cursor = 1;
+    
+    // 紀錄按鍵的上一次狀態 (1代表沒按下, 0代表按下)
+    uint8_t last_btn_plus = 1;
+    uint8_t last_btn_minus = 1;
+    uint8_t last_btn_next = 1;
+    uint8_t last_btn_exit = 1;
+
     while(1) {
-        OLED_Clear(); 
-        RV3028_GetTime(&current_time);
-        Safe_Print_OLED(0,  "    --- RTC CURRENT TIME ---");
-        Safe_Print_OLED(16, "           %04d/%02d/%02d", current_time.year, current_time.month, current_time.date);
-        Safe_Print_OLED(32, "            %02d:%02d:%02d", current_time.hours, current_time.minutes, current_time.seconds);
-        Safe_Print_OLED(48, hint_text);
-        OLED_Update(); 
-        
-        if((PF->PIN & exit_btn_bit) == 0) { 
-            Delay_ms(50); 
-            if((PF->PIN & exit_btn_bit) == 0) { 
-                JigBeep(100); 
-                while((PF->PIN & exit_btn_bit) == 0) { Delay_ms(10); } 
-                break; 
-            } 
+        if (mode == 0) {
+            RV3028_GetTime(&current_time);
         }
-        Delay_ms(100); 
+
+        OLED_Clear();
+        blink_timer++;
+        if(blink_timer > 10) { show_cursor = !show_cursor; blink_timer = 0; } // 控制閃爍速度
+
+        if (mode == 0) {
+            Safe_Print_OLED(0,  "    --- RTC CURRENT TIME ---");
+            Safe_Print_OLED(16, "           %04d/%02d/%02d", current_time.year, current_time.month, current_time.date);
+            Safe_Print_OLED(32, "            %02d:%02d:%02d", current_time.hours, current_time.minutes, current_time.seconds);
+            Safe_Print_OLED(48, " R:Set Time   Y:Back"); 
+        } else {
+            char y_str[8], m_str[8], d_str[8], hr_str[8], min_str[8], sec_str[8];
+            
+            // 安全字串轉換，避免 snprintf 參數異常
+            if (mode == 1 && !show_cursor) strcpy(y_str, "    "); else snprintf(y_str, 8, "%04d", edit_time.year);
+            if (mode == 2 && !show_cursor) strcpy(m_str, "  "); else snprintf(m_str, 8, "%02d", edit_time.month);
+            if (mode == 3 && !show_cursor) strcpy(d_str, "  "); else snprintf(d_str, 8, "%02d", edit_time.date);
+            if (mode == 4 && !show_cursor) strcpy(hr_str, "  "); else snprintf(hr_str, 8, "%02d", edit_time.hours);
+            if (mode == 5 && !show_cursor) strcpy(min_str, "  "); else snprintf(min_str, 8, "%02d", edit_time.minutes);
+            if (mode == 6 && !show_cursor) strcpy(sec_str, "  "); else snprintf(sec_str, 8, "%02d", edit_time.seconds);
+
+            Safe_Print_OLED(0,  "     *** SET RTC TIME ***");
+            Safe_Print_OLED(16, "           %s/%s/%s", y_str, m_str, d_str);
+            Safe_Print_OLED(32, "            %s:%s:%s", hr_str, min_str, sec_str);
+            Safe_Print_OLED(48, " R:Next G:+ B:- Y:Cancel");
+        }
+        OLED_Update();
+        
+        // 讀取當前按鍵狀態 (0為按下, 1為放開)
+        uint8_t btn_exit  = (PF->PIN & exit_btn_bit) ? 1 : 0;
+        uint8_t btn_next  = (PA->PIN & BIT8) ? 1 : 0;
+        uint8_t btn_plus  = (PF->PIN & BIT4) ? 1 : 0;
+        uint8_t btn_minus = (PF->PIN & BIT3) ? 1 : 0;
+
+        // 1. 黃色鍵 (退出/取消) - 偵測按下瞬間
+        if (btn_exit == 0 && last_btn_exit == 1) {
+            JigBeep(100);
+            if (mode == 0) break; else mode = 0;
+        }
+        
+        // 2. 紅色鍵 (NEXT/進入設定) - 偵測按下瞬間
+        if (btn_next == 0 && last_btn_next == 1) {
+            JigBeep(50);
+            if (mode == 0) { 
+                mode = 1; 
+                RV3028_GetTime(&edit_time); 
+                if (edit_time.year < 2026 || edit_time.year > 2099) edit_time.year = 2026;
+            }
+            else { 
+                mode++; 
+                if (mode > 6) { 
+                    RV3028_SetTime(&edit_time); 
+                    mode = 0; 
+                    JigBeep(200); 
+                } 
+            }
+            show_cursor = 1; blink_timer = 0; // 切換時強制顯示游標
+        }
+
+        // 3. 綠色鍵 (+) - 偵測按下瞬間
+        if (mode > 0 && btn_plus == 0 && last_btn_plus == 1) {
+            JigBeep(30);
+            show_cursor = 1; blink_timer = 0; // 按下時強制顯示數字
+            if (mode == 1) { edit_time.year++; if (edit_time.year > 2099) edit_time.year = 2026; }
+            else if (mode == 2) { edit_time.month++; if (edit_time.month > 12) edit_time.month = 1; }
+            else if (mode == 3) { edit_time.date++; if (edit_time.date > 31) edit_time.date = 1; }
+            else if (mode == 4) { edit_time.hours++; if (edit_time.hours > 23) edit_time.hours = 0; }
+            else if (mode == 5) { edit_time.minutes++; if (edit_time.minutes > 59) edit_time.minutes = 0; }
+            else if (mode == 6) { edit_time.seconds++; if (edit_time.seconds > 59) edit_time.seconds = 0; }
+        }
+
+        // 4. 藍色鍵 (-) - 偵測按下瞬間，加入防禦 Underflow 邏輯
+        if (mode > 0 && btn_minus == 0 && last_btn_minus == 1) {
+            JigBeep(30);
+            show_cursor = 1; blink_timer = 0; // 按下時強制顯示數字
+            if (mode == 1) { edit_time.year--; if (edit_time.year < 2026) edit_time.year = 2099; }
+            else if (mode == 2) { edit_time.month--; if (edit_time.month < 1 || edit_time.month > 12) edit_time.month = 12; }
+            else if (mode == 3) { edit_time.date--; if (edit_time.date < 1 || edit_time.date > 31) edit_time.date = 31; }
+            else if (mode == 4) { if (edit_time.hours == 0) edit_time.hours = 23; else edit_time.hours--; }
+            else if (mode == 5) { if (edit_time.minutes == 0) edit_time.minutes = 59; else edit_time.minutes--; }
+            else if (mode == 6) { if (edit_time.seconds == 0) edit_time.seconds = 59; else edit_time.seconds--; }
+        }
+
+        // 將當前狀態存起來，作為下一次迴圈的比對基準
+        last_btn_exit  = btn_exit;
+        last_btn_next  = btn_next;
+        last_btn_plus  = btn_plus;
+        last_btn_minus = btn_minus;
+
+        Delay_ms(15); // 加快主迴圈頻率，確保不會漏掉短按
     }
 }
 
@@ -765,7 +856,9 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
     char title_buf[32]; snprintf(title_buf, sizeof(title_buf), "UART2 Mntr %u", u32BaudRate);
     Show_Test_Start_Screen(title_buf); 
 
-    int rx_count = 0; char rx_buf[128] = {0}; uint32_t loop_tick = 1000; int power_state = 0;
+    int rx_count = 0; 
+		static char rx_buf[128] = {0}; 
+		uint32_t loop_tick = 1000; int power_state = 0;
 
     while(1) {
         if (Check_Power_Toggle(&power_state)) {
@@ -810,7 +903,8 @@ void Wiegand_Monitor_Test(void) {
     Show_Test_Start_Screen("Wiegand Monitor"); 
 
     int rx_count = 0; uint32_t loop_tick = 1000; int power_state = 0; 
-    uint64_t last_wg_data = 0; char data_str[32] = {0};
+    uint64_t last_wg_data = 0; 
+		static char data_str[32] = {0};
 
     while(1) {
         if (Check_Power_Toggle(&power_state)) {
@@ -868,7 +962,8 @@ void TK2_Monitor_Test(void) {
     Show_Test_Start_Screen("TK2 Monitor");
     
     int rx_count = 0; uint32_t loop_tick = 1000; int power_state = 0;
-    uint8_t last_tk2_cnt = 0; uint32_t tk2_idle_tick = 0; char tk2_str[64] = "WAITING...";
+    uint8_t last_tk2_cnt = 0; uint32_t tk2_idle_tick = 0; 
+	  static char tk2_str[64] = "WAITING...";
 
     while(1) {
         if (Check_Power_Toggle(&power_state)) {
@@ -919,6 +1014,13 @@ int main(void) {
     USBD_Open(&gsInfo, HID_ClassRequest, NULL);
     HID_Init();
     NVIC_EnableIRQ(USBD_IRQn);
+    NVIC_SetPriority(USBD_IRQn, 0); // 給 USB 絕對最高優先權
+    
+    // 如果你有開啟 UART 或是 GPIO 中斷，去 SYS_Init() 或 setup 把他們降級
+    NVIC_SetPriority(UART02_IRQn, 1);
+    NVIC_SetPriority(UART13_IRQn, 1);
+    NVIC_SetPriority(GPIO_PAPBPGPH_IRQn, 2);
+	
     USBD_Start();
     
     OLED_Force_Reset();
