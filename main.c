@@ -433,8 +433,12 @@ void JIG_8CP_Send_Packet(const char* cmd_code, const char* data) {
 
 void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
     if (strcmp(cmd_code, "SC") == 0) {
-        // [V5.3.2 修改] 收到指令後不再原地發送，而是瞬間丟進背景佇列
+        // [V5.3.2] 收到條碼，瞬間丟進背景佇列發送
         USBHID_Enqueue_String(data); 
+    }
+    else if (strcmp(cmd_code, "V") == 0) {
+        // [V5.3.2] 收到版本請求，立刻回傳版本號
+        JIG_8CP_Send_Packet("V", "V5.3.2");
     }
 }
 
@@ -444,15 +448,27 @@ void Process_UART1_JIG_8CP_Parser(void) {
     while(UART1_Read_Byte(&c)) {
         if (c == JIG_8CP_STX) { is_stx_received = 1; rx_idx = 0; } 
         else if (c == JIG_8CP_CR) {
-            if (is_stx_received && rx_idx >= 4) {
+            // [升級] 至少要有 1 Byte 指令 + 2 Byte Checksum = 3 Bytes
+            if (is_stx_received && rx_idx >= 3) {
                 rx_packet[rx_idx] = '\0'; 
                 char received_chk[3]; received_chk[0] = rx_packet[rx_idx - 2]; received_chk[1] = rx_packet[rx_idx - 1]; received_chk[2] = '\0';
                 rx_packet[rx_idx - 2] = '\0'; 
                 char calculated_chk[3]; Get_JIG_8CP_Checksum((char*)rx_packet, calculated_chk); 
                 
                 if (strcmp(received_chk, calculated_chk) == 0) {
-                    char cmd_code[3]; cmd_code[0] = rx_packet[0]; cmd_code[1] = rx_packet[1]; cmd_code[2] = '\0';
-                    JIG_8CP_Command_Handler(cmd_code, (char*)&rx_packet[2]); 
+                    char cmd_code[3] = {0}; 
+                    char* data_str = "";
+                    int payload_len = rx_idx - 2;
+                    
+                    // 智慧判斷指令長度：支援單字元 'V' 或雙字元 'SC'
+                    if (payload_len >= 2) {
+                        cmd_code[0] = rx_packet[0]; cmd_code[1] = rx_packet[1];
+                        data_str = (char*)&rx_packet[2];
+                    } else {
+                        cmd_code[0] = rx_packet[0];
+                        data_str = (char*)&rx_packet[1];
+                    }
+                    JIG_8CP_Command_Handler(cmd_code, data_str); 
                 }
             }
             is_stx_received = 0; 
@@ -883,15 +899,15 @@ int main(void) {
         Global_Background_Tasks(); 
         if (g_force_alarm_menu) { current_idx = 3; Time_Set_Menu_Loop(); continue; }
 
-        UI_Draw_Menu_State("Select Function", menu_items, NUM_ITEMS, current_idx);
+        UI_Draw_Menu_State("Select Function (V5.3.2)", menu_items, NUM_ITEMS, current_idx);
         int selected = 0;
 
         while(1) {
             Global_Background_Tasks(); 
             if (g_force_alarm_menu) { selected = 2; break; }
 
-            if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { JigBeep(50); UI_Menu_Scroll_Anim_Smooth("Select Function", menu_items, NUM_ITEMS, current_idx, 1); current_idx = (current_idx + 1) % NUM_ITEMS; while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; } }
-            if((PF->PIN & BIT4) == 0) { Delay_ms(50); if((PF->PIN & BIT4) == 0) { JigBeep(50); UI_Menu_Scroll_Anim_Smooth("Select Function", menu_items, NUM_ITEMS, current_idx, -1); current_idx = (current_idx - 1 + NUM_ITEMS) % NUM_ITEMS; while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; } }
+            if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { JigBeep(50); UI_Menu_Scroll_Anim_Smooth("Select Function (V5.3.2)", menu_items, NUM_ITEMS, current_idx, 1); current_idx = (current_idx + 1) % NUM_ITEMS; while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; } }
+            if((PF->PIN & BIT4) == 0) { Delay_ms(50); if((PF->PIN & BIT4) == 0) { JigBeep(50); UI_Menu_Scroll_Anim_Smooth("Select Function (V5.3.2)", menu_items, NUM_ITEMS, current_idx, -1); current_idx = (current_idx - 1 + NUM_ITEMS) % NUM_ITEMS; while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; } }
             if((PF->PIN & BIT5) == 0) { Delay_ms(50); if((PF->PIN & BIT5) == 0) { JigBeep(200); while((PF->PIN & BIT5) == 0) { Delay_ms(10); } selected = 1; break; } }
         }
 
