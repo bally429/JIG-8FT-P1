@@ -8,8 +8,10 @@
  * * [版本履歷]
  * V5.3.0 (2026/06/30): 引入 TMR1 1ms 背景任務、全域 UART1 SC 無感轉發、多工鬧鐘與碼表。
  * V5.3.1 (2026/06/30): 補回遺漏的 UI 繪圖與儀表板更新函式，修復編譯錯誤。
- * V5.3.2 (2026/06/30): [重大架構升級] USB HID 全面改為「非同步佇列 (Ring Buffer) 背景發送」，
- * 徹底解決在特定介面 (如 TK2, Wiegand) 中掃描條碼導致卡死或無輸出的問題。
+ * V5.3.3 (2026/06/30): [重大架構升級] USB HID 全面改為「非同步佇列 (Ring Buffer) 背景發送」。
+ * V5.3.4 (2026/07/02): 刪除 UART0 相關程式碼 暫時無用到。
+ * V5.3.6 (2026/07/02): [架構解耦] 引入 VRAM 虛擬顯存引擎，將 vsnprintf 運算與 OLED 硬體 I/O 徹底分離。
+ * 結合臨界區 (Critical Section) 保護與修正 Dashboard 字串越界問題，終結 CAPS/NUM 按鍵造成的死機。
  * ===========================================================================================
  */
 
@@ -38,7 +40,7 @@ volatile uint8_t g_u8StopwatchRunning = 0;
 volatile uint8_t g_force_alarm_menu = 0; 
 
 // =======================================================
-// [V5.3.2] USB HID 專用非同步發送緩衝區 (Ring Buffer)
+// [V5.3.3] USB HID 專用非同步發送緩衝區 (Ring Buffer)
 // =======================================================
 #define HID_TX_BUF_SIZE 256
 volatile uint8_t g_hid_tx_buf[HID_TX_BUF_SIZE];
@@ -52,11 +54,6 @@ volatile uint16_t g_hid_tail = 0;
 volatile uint8_t g_u1_rx_buf[UART1_RX_BUF_SIZE];
 volatile uint16_t g_u1_rx_head = 0;
 volatile uint16_t g_u1_rx_tail = 0;
-
-#define RX0_BUF_SIZE 128
-volatile uint8_t g_u0_rx_buf[RX0_BUF_SIZE];
-volatile uint16_t g_u0_rx_head = 0;
-volatile uint16_t g_u0_rx_tail = 0;
 
 #define UART2_RX_BUF_SIZE 256
 volatile uint8_t g_u2_rx_buf[UART2_RX_BUF_SIZE];
@@ -104,8 +101,13 @@ void Delay_ms(uint32_t ms);
 void Delay_us(uint32_t us); 
 void JigForceBeep(uint32_t ms); 
 void JigBeep(uint32_t ms);      
+
+// [V5.3.6 架構升級 API]
+void UI_Clear(void);
+void UI_Update(void);
 void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, const char *fmt, ...);
 void Safe_Print_OLED(int y, const char *fmt, ...);
+
 void Time_Set_Menu_Loop(void);
 void Global_Background_Tasks(void);
 void Show_Test_Start_Screen(const char* title);
@@ -114,7 +116,7 @@ void UI_Draw_Menu_State(const char* title, const char** items, int num_items, in
 void UI_Menu_Scroll_Anim_Smooth(const char* title, const char** items, int num_items, int old_idx, int dir);
 int Check_Exit_Button(void);
 
-// [V5.3.2 新增宣告]
+// [V5.3.3 新增宣告]
 void USBHID_Enqueue_Data(const char* str);
 void USBHID_Enqueue_String(const char* str);
 void USBHID_Process_Queue(void);
@@ -171,11 +173,11 @@ void Process_Background_Sampling(int power_state, uint32_t loop_tick) {
 }
 
 void Show_Test_Start_Screen(const char* title) {
-    OLED_Clear();
+    UI_Clear();
     Safe_Print_OLED(0, "%s", title); 
     Safe_Print_OLED(16, "Red Btn (Power)"); 
     Safe_Print_OLED(32, "Blue Btn (-) Reset"); 
-    OLED_Update(); 
+    UI_Update(); 
 
     uint32_t wait_tick = 0;
     while(wait_tick < 5000) {
@@ -183,7 +185,8 @@ void Show_Test_Start_Screen(const char* title) {
         if (Check_Exit_Button()) break; 
         Delay_ms(10); wait_tick += 10;
     }
-    OLED_Clear();
+    UI_Clear();
+    UI_Update(); 
     Reset_Current_Filter(); 
 }
 
@@ -192,58 +195,126 @@ void Update_Dashboard_Display(int power_state, int rx_count, const char* specifi
     float inst_current = getCurrent_mA();
     if (inst_current == 0.0f) { set237Calibration_1A(); inst_current = getCurrent_mA(); }
         
-    char l_buf[17], r_buf[17];
-    OLED_Clear();
-    snprintf(l_buf, 17, "AVG:%.1fmA", g_fCurrentAvg);
-    snprintf(r_buf, 17, "Max:%.1fmA", g_fMaxCurrent);
+    static char l_buf[32], r_buf[32];
+    static char r_data[132]; // [V5.3.6 FIX] 容量必須大於 RS232 的最大可能長度 128
+    
+    UI_Clear();
+    snprintf(l_buf, sizeof(l_buf), "AVG:%.1fmA", g_fCurrentAvg);
+    snprintf(r_buf, sizeof(r_buf), "Max:%.1fmA", g_fMaxCurrent);
     Safe_Print_OLED(0, "%-16s%s", l_buf, r_buf); 
     
-    snprintf(l_buf, 17, "CUR:%.1fmA", inst_current);
-    snprintf(r_buf, 17, "Min:%.0fmA", (g_fMinCurrent==9999.0f)?0:g_fMinCurrent);
+    snprintf(l_buf, sizeof(l_buf), "CUR:%.1fmA", inst_current);
+    snprintf(r_buf, sizeof(r_buf), "Min:%.0fmA", (g_fMinCurrent==9999.0f)?0:g_fMinCurrent);
     Safe_Print_OLED(16, "%-16s%s", l_buf, r_buf);
     
-    snprintf(l_buf, 17, "%.2fV", voltage);
+    snprintf(l_buf, sizeof(l_buf), "%.2fV", voltage);
     Safe_Print_OLED(32, "%-16s[Power:%s]", l_buf, power_state?"ON ":"OFF");
     
-    char r_data[32];
-    snprintf(l_buf, 17, "                "); 
+    // [V5.3.6 FIX] 使用 memset 安全清空，防禦越界掃描
+    memset(r_data, 0, sizeof(r_data));
     if(strlen(specific_data_str) > 0 && rx_count >= 0) {
         snprintf(r_data, sizeof(r_data), "%02d/%s", rx_count, specific_data_str);
     } else {
-        strncpy(r_data, specific_data_str, sizeof(r_data));
+        snprintf(r_data, sizeof(r_data), "%s", specific_data_str);
     }
-    snprintf(r_buf, 17, "%s", r_data);
+    snprintf(r_buf, sizeof(r_buf), "%.16s", r_data); // 嚴格限制印出長度
+    snprintf(l_buf, sizeof(l_buf), "                "); 
+
     Safe_Print_OLED(48, "%-16s%s", l_buf, r_buf); 
-    OLED_Update(); 
+    UI_Update(); 
 }
 
 // =======================================================
-// [OLED UI 繪圖底層引擎]
+// [V5.3.6 架構升級：OLED 虛擬顯存 (VRAM) 與解耦渲染引擎]
 // =======================================================
-void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, const char *fmt, ...) {
-    char temp_buf[128]; char full_line[33]; va_list argptr;
-    va_start(argptr, fmt); vsnprintf(temp_buf, sizeof(temp_buf), fmt, argptr); va_end(argptr);
-    int temp_len = strlen(temp_buf);
-    for(int i = 0; i < 32; i++) { if(i < temp_len) { char c = temp_buf[i]; if(c < 0x20 || c > 0x7E) c = ' '; full_line[i] = c; } else { full_line[i] = ' '; } }
-    full_line[32] = '\0'; OLED_PrintString(0, y, min_y, max_y, full_line, brightness);
+#define MAX_VRAM_LINES 8
+
+typedef struct {
+    int y;
+    int min_y;
+    int max_y;
+    uint8_t brightness;
+    char text[33];
+    uint8_t active;
+} VRAM_Line;
+
+VRAM_Line g_vram[MAX_VRAM_LINES];
+
+void UI_Clear(void) {
+    for(int i = 0; i < MAX_VRAM_LINES; i++) {
+        g_vram[i].active = 0;
+    }
 }
-void Safe_Print_OLED(int y, const char *fmt, ...) {
-    char temp_buf[128]; char full_line[33]; va_list argptr;
-    va_start(argptr, fmt); vsnprintf(temp_buf, sizeof(temp_buf), fmt, argptr); va_end(argptr);
+
+void UI_Update(void) {
+    // ?? 關鍵保護：物理傳輸期間完全鎖定 USB 中斷，徹底保護 I2C/SPI 時序
+    NVIC_DisableIRQ(USBD_IRQn);
+    OLED_Clear();
+    for(int i = 0; i < MAX_VRAM_LINES; i++) {
+        if(g_vram[i].active) {
+            OLED_PrintString(0, g_vram[i].y, g_vram[i].min_y, g_vram[i].max_y, g_vram[i].text, g_vram[i].brightness);
+        }
+    }
+    OLED_Update();
+    NVIC_EnableIRQ(USBD_IRQn); // ?? 傳輸結束，釋放中斷
+}
+
+void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, const char *fmt, ...) {
+    int idx = -1;
+    for(int i = 0; i < MAX_VRAM_LINES; i++) {
+        if(!g_vram[i].active) { idx = i; break; }
+    }
+    if(idx == -1) return; // 緩衝區滿了則丟棄本次渲染
+
+    char temp_buf[128];
+    va_list argptr;
+    va_start(argptr, fmt);
+    
+    // ?? 關鍵保護：鎖住中斷保護 vsnprintf，根除微型函式庫重入 (Re-entrancy) Bug
+    NVIC_DisableIRQ(USBD_IRQn);
+    vsnprintf(temp_buf, sizeof(temp_buf), fmt, argptr);
+    NVIC_EnableIRQ(USBD_IRQn);
+    
+    va_end(argptr);
+
     int temp_len = strlen(temp_buf);
-    for(int i = 0; i < 32; i++) { if(i < temp_len) { char c = temp_buf[i]; if(c < 0x20 || c > 0x7E) c = ' '; full_line[i] = c; } else { full_line[i] = ' '; } }
-    full_line[32] = '\0'; OLED_PrintString(0, y, 0, 63, full_line, 0x0F);
+    for(int i = 0; i < 32; i++) {
+        if(i < temp_len) {
+            char c = temp_buf[i];
+            g_vram[idx].text[i] = (c >= 0x20 && c <= 0x7E) ? c : ' ';
+        } else {
+            g_vram[idx].text[i] = ' ';
+        }
+    }
+    g_vram[idx].text[32] = '\0';
+    g_vram[idx].y = y;
+    g_vram[idx].min_y = min_y;
+    g_vram[idx].max_y = max_y;
+    g_vram[idx].brightness = brightness;
+    g_vram[idx].active = 1; // 標記此行需要渲染
+}
+
+void Safe_Print_OLED(int y, const char *fmt, ...) {
+    // 代理給 Smooth 函式，預設滿版與最高亮度
+    char temp_buf[33];
+    va_list argptr;
+    va_start(argptr, fmt);
+    NVIC_DisableIRQ(USBD_IRQn);
+    vsnprintf(temp_buf, sizeof(temp_buf), fmt, argptr);
+    NVIC_EnableIRQ(USBD_IRQn);
+    va_end(argptr);
+    Safe_Print_OLED_Smooth(y, 0, 63, 0x0F, "%s", temp_buf);
 }
 
 void UI_Draw_Menu_State(const char* title, const char** items, int num_items, int curr_idx) {
     int prev_idx = (curr_idx - 1 + num_items) % num_items;
     int next_idx = (curr_idx + 1) % num_items;
-    OLED_Clear();
+    UI_Clear();
     Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, title);                  
     Safe_Print_OLED_Smooth(16, 16, 63, 0x04, "  %s", items[prev_idx]); 
     Safe_Print_OLED_Smooth(32, 16, 63, 0x0F, "> %s", items[curr_idx]); 
     Safe_Print_OLED_Smooth(48, 16, 63, 0x04, "  %s", items[next_idx]); 
-    OLED_Update(); 
+    UI_Update(); 
 }
 
 void UI_Menu_Scroll_Anim_Smooth(const char* title, const char** items, int num_items, int old_idx, int dir) {
@@ -253,7 +324,7 @@ void UI_Menu_Scroll_Anim_Smooth(const char* title, const char** items, int num_i
     int pp_idx = (old_idx - 2 + num_items * 2) % num_items; 
 
     for (int offset = 0; offset <= 16; offset += 4) {
-        OLED_Clear(); Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, title); 
+        UI_Clear(); Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, title); 
         if (dir == 1) { 
             Safe_Print_OLED_Smooth(16 - offset, 16, 63, 0x02, "  %s", items[p_idx]); 
             Safe_Print_OLED_Smooth(32 - offset, 16, 63, 0x0F - (offset/2), "  %s", items[old_idx]);
@@ -265,7 +336,7 @@ void UI_Menu_Scroll_Anim_Smooth(const char* title, const char** items, int num_i
             Safe_Print_OLED_Smooth(32 + offset, 16, 63, 0x0F - (offset/2), "  %s", items[old_idx]);
             Safe_Print_OLED_Smooth(48 + offset, 16, 63, 0x02, "  %s", items[n_idx]);
         }
-        OLED_Update(); 
+        UI_Update(); 
     }
 }
 
@@ -277,11 +348,11 @@ void Handle_Alarm_Trigger(void) {
     uint32_t start_ms = g_u32SystemMs;
     uint32_t beep_timer = g_u32SystemMs - 2000; 
     
-    OLED_Clear();
+    UI_Clear();
     Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "================================");
     Safe_Print_OLED_Smooth(24, 0, 63, 0x0F, "      TIME'S UP! (ALARM)");
     Safe_Print_OLED_Smooth(48, 0, 63, 0x0F, "================================");
-    OLED_Update();
+    UI_Update();
 
     while(g_alarm_triggered) {
         Process_UART1_JIG_8CP_Parser(); // 維持 UART 背景接收能力
@@ -310,19 +381,25 @@ void Global_Background_Tasks(void) {
     // 1. 全域背景處理 UART1 封包
     Process_UART1_JIG_8CP_Parser();
     
-    // 2. [V5.3.2] 全域處理 USB HID 佇列發送 (核心解耦技術)
+    // 2. [V5.3.3] 全域處理 USB HID 佇列發送 (核心解耦技術)
     USBHID_Process_Queue();
     
     // 3. 全域背景檢查鬧鐘
-    static uint8_t last_sec = 99;
-    RTC_TimeTypeDef rtc;
-    RV3028_GetTime(&rtc);
-    if (rtc.seconds != last_sec) {
-        last_sec = rtc.seconds;
-        for(int i=0; i<6; i++) {
-            if(g_alarms[i].enabled && g_alarms[i].hours == rtc.hours && g_alarms[i].minutes == rtc.minutes && g_alarms[i].seconds == rtc.seconds) {
-                g_alarm_triggered = 1;
-                break; 
+    static uint32_t s_last_rtc_read = 0;
+    if (g_u32SystemMs - s_last_rtc_read >= 500) {
+        s_last_rtc_read = g_u32SystemMs; 
+        
+        static uint8_t last_sec = 99;
+        RTC_TimeTypeDef rtc;
+        RV3028_GetTime(&rtc); 
+        
+        if (rtc.seconds != last_sec) {
+            last_sec = rtc.seconds;
+            for(int i=0; i<6; i++) {
+                if(g_alarms[i].enabled && g_alarms[i].hours == rtc.hours && g_alarms[i].minutes == rtc.minutes && g_alarms[i].seconds == rtc.seconds) {
+                    g_alarm_triggered = 1;
+                    break; 
+                }
             }
         }
     }
@@ -340,7 +417,7 @@ int Get_Weekday(int year, int month, int day) {
 const char* week_str[] = {"Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri"};
 
 // =======================================================
-// [V5.3.2 新架構：USB HID 非同步佇列與發送引擎]
+// [V5.3.3 新架構：USB HID 非同步佇列與發送引擎]
 // =======================================================
 // 1. 將資料丟入緩衝區 (非阻塞，瞬間完成)
 void USBHID_Enqueue_Data(const char* str) {
@@ -353,15 +430,18 @@ void USBHID_Enqueue_Data(const char* str) {
     }
 }
 
-// 2. 封裝字串，根據設定決定是否補上 Enter (CR)
 void USBHID_Enqueue_String(const char* str) {
-    USBHID_Enqueue_Data(str);
+    while(*str) {
+        uint16_t next = (g_hid_head + 1) % HID_TX_BUF_SIZE;
+        if (next != g_hid_tail) { g_hid_tx_buf[g_hid_head] = *str++; g_hid_head = next; } 
+        else break; // Buffer full
+    }
+    // 若設定補 CR
     if (g_u8UsbHidAppendCR) {
-        char cr_str[2] = {0x0D, 0x00}; // 0x0D 是 Enter
-        USBHID_Enqueue_Data(cr_str);
+        uint16_t next = (g_hid_head + 1) % HID_TX_BUF_SIZE;
+        if (next != g_hid_tail) { g_hid_tx_buf[g_hid_head] = 0x0D; g_hid_head = next; }
     }
 }
-
 // 3. 底層觸發鍵盤按壓
 int Trigger_USB_HID_Key(uint8_t mod, uint8_t key) {
     uint8_t report[8] = {0}; report[0] = mod; report[2] = key;
@@ -433,12 +513,10 @@ void JIG_8CP_Send_Packet(const char* cmd_code, const char* data) {
 
 void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
     if (strcmp(cmd_code, "SC") == 0) {
-        // [V5.3.2] 收到條碼，瞬間丟進背景佇列發送
         USBHID_Enqueue_String(data); 
     }
     else if (strcmp(cmd_code, "V") == 0) {
-        // [V5.3.2] 收到版本請求，立刻回傳版本號
-        JIG_8CP_Send_Packet("V", "V5.3.2");
+        JIG_8CP_Send_Packet("V", "V5.3.6");
     }
 }
 
@@ -448,7 +526,6 @@ void Process_UART1_JIG_8CP_Parser(void) {
     while(UART1_Read_Byte(&c)) {
         if (c == JIG_8CP_STX) { is_stx_received = 1; rx_idx = 0; } 
         else if (c == JIG_8CP_CR) {
-            // [升級] 至少要有 1 Byte 指令 + 2 Byte Checksum = 3 Bytes
             if (is_stx_received && rx_idx >= 3) {
                 rx_packet[rx_idx] = '\0'; 
                 char received_chk[3]; received_chk[0] = rx_packet[rx_idx - 2]; received_chk[1] = rx_packet[rx_idx - 1]; received_chk[2] = '\0';
@@ -460,7 +537,6 @@ void Process_UART1_JIG_8CP_Parser(void) {
                     char* data_str = "";
                     int payload_len = rx_idx - 2;
                     
-                    // 智慧判斷指令長度：支援單字元 'V' 或雙字元 'SC'
                     if (payload_len >= 2) {
                         cmd_code[0] = rx_packet[0]; cmd_code[1] = rx_packet[1];
                         data_str = (char*)&rx_packet[2];
@@ -530,7 +606,6 @@ void SYS_Init(void) {
     CLK_EnableModuleClock(USBD_MODULE);
     CLK->AHBCLK |= ((1ul << 0)|(1ul << 1)|(1ul << 2)|(1ul << 3)|(1ul << 5)); 
     CLK_EnableModuleClock(SPI0_MODULE); CLK_EnableModuleClock(I2C0_MODULE); CLK_EnableModuleClock(I2C1_MODULE); 
-    CLK_EnableModuleClock(UART0_MODULE); CLK_SetModuleClock(UART0_MODULE, CLK_CLKSEL1_UART0SEL_HIRC, CLK_CLKDIV0_UART0(1));
     CLK_EnableModuleClock(UART1_MODULE); CLK_SetModuleClock(UART1_MODULE, CLK_CLKSEL1_UART1SEL_HIRC, CLK_CLKDIV0_UART1(1));
     CLK_EnableModuleClock(UART2_MODULE); CLK_SetModuleClock(UART2_MODULE, CLK_CLKSEL3_UART2SEL_HIRC, CLK_CLKDIV4_UART2(1));
     CLK_EnableModuleClock(TMR0_MODULE); CLK_SetModuleClock(TMR0_MODULE, CLK_CLKSEL1_TMR0SEL_HIRC, 0);
@@ -543,7 +618,6 @@ void SYS_Init(void) {
     NVIC_EnableIRQ(TMR1_IRQn);
     TIMER_Start(TIMER1);
 
-    UART_Open(UART0, 115200); UART0->FIFO = (UART0->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE; UART_EnableInt(UART0, UART_INTEN_RDAIEN_Msk);
     UART_Open(UART1, 115200); UART1->FIFO = (UART1->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE;
     UART_EnableInt(UART1, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk); NVIC_EnableIRQ(UART13_IRQn);
     UART_Open(UART2, 9600); UART2->FIFO = (UART2->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE; UART_EnableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
@@ -572,19 +646,22 @@ void UART13_IRQHandler(void) {
     }
 }
 void UART02_IRQHandler(void) {
-    if(UART_GET_INT_FLAG(UART0, UART_INTSTS_RDAINT_Msk)) {
-        while(!UART_GET_RX_EMPTY(UART0)) {
-            uint8_t c = UART_READ(UART0); uint16_t next_head = (g_u0_rx_head + 1) % RX0_BUF_SIZE;
-            if (next_head != g_u0_rx_tail) { g_u0_rx_buf[g_u0_rx_head] = c; g_u0_rx_head = next_head; }
-        }
+    uint32_t u32u2IntSts = UART2->INTSTS; 
+    uint32_t u32u2FIFOSts = UART2->FIFOSTS;
+    
+    if(u32u2FIFOSts & (UART_FIFOSTS_FEF_Msk | UART_FIFOSTS_PEF_Msk | UART_FIFOSTS_BIF_Msk | UART_FIFOSTS_RXOVIF_Msk)) { 
+        UART2->FIFOSTS = (UART_FIFOSTS_FEF_Msk | UART_FIFOSTS_PEF_Msk | UART_FIFOSTS_BIF_Msk | UART_FIFOSTS_RXOVIF_Msk); 
     }
-    uint32_t u32u2IntSts = UART2->INTSTS; uint32_t u32u2FIFOSts = UART2->FIFOSTS;
-    if(u32u2FIFOSts & (UART_FIFOSTS_FEF_Msk | UART_FIFOSTS_PEF_Msk | UART_FIFOSTS_BIF_Msk | UART_FIFOSTS_RXOVIF_Msk)) { UART2->FIFOSTS = (UART_FIFOSTS_FEF_Msk | UART_FIFOSTS_PEF_Msk | UART_FIFOSTS_BIF_Msk | UART_FIFOSTS_RXOVIF_Msk); }
+    
     if(u32u2IntSts & (UART_INTSTS_RDAINT_Msk | UART_INTSTS_RXTOINT_Msk)) {
         while((UART2->FIFOSTS & UART_FIFOSTS_RXEMPTY_Msk) == 0) {
-            uint8_t c = UART_READ(UART2); if (c == 0x00 || c == 0xFF) continue;
+            uint8_t c = UART_READ(UART2); 
+            if (c == 0x00 || c == 0xFF) continue;
             uint16_t next_head = (g_u2_rx_head + 1) % UART2_RX_BUF_SIZE;
-            if (next_head != g_u2_rx_tail) { g_u2_rx_buf[g_u2_rx_head] = c; g_u2_rx_head = next_head; }
+            if (next_head != g_u2_rx_tail) { 
+                g_u2_rx_buf[g_u2_rx_head] = c; 
+                g_u2_rx_head = next_head; 
+            }
         }
     }
 }
@@ -605,33 +682,39 @@ void RTC_Time_Date_Loop(void) {
     while(1) {
         Global_Background_Tasks(); if (g_force_alarm_menu) break;
         blink_timer++; if(blink_timer > 10) { show_cursor = !show_cursor; blink_timer = 0; }
-        OLED_Clear();
-
+        
+        UI_Clear();
         if (mode == 0) {
             RTC_TimeTypeDef current_time;
             RV3028_GetTime(&current_time);
             int wd = Get_Weekday(current_time.year, current_time.month, current_time.date);
+            
+            // 已全數替換為純 ASCII 空白 (0x20)，防止 VRAM 越界
             Safe_Print_OLED(0,  "      --- TIME & DATE ---");
             Safe_Print_OLED(16, "       %04d/%02d/%02d (%s)", current_time.year, current_time.month, current_time.date, week_str[wd]);
             Safe_Print_OLED(32, "         %02d:%02d:%02d", current_time.hours, current_time.minutes, current_time.seconds);
-            Safe_Print_OLED(48, " R:Set Time   Y:Back"); 
+            Safe_Print_OLED(48, " W:Set Time   Y:Back"); 
         } else {
             char y_s[8], m_s[8], d_s[8], hr_s[8], min_s[8], sec_s[8];
+            
+            // 已替換為純 ASCII 空白，根除 char array[8] 的 Buffer Overflow 問題
             if (mode==1 && !show_cursor) strcpy(y_s,"    "); else snprintf(y_s,8,"%04d",edit_time.year);
-            if (mode==2 && !show_cursor) strcpy(m_s,"  "); else snprintf(m_s,8,"%02d",edit_time.month);
-            if (mode==3 && !show_cursor) strcpy(d_s,"  "); else snprintf(d_s,8,"%02d",edit_time.date);
-            if (mode==4 && !show_cursor) strcpy(hr_s,"  "); else snprintf(hr_s,8,"%02d",edit_time.hours);
+            if (mode==2 && !show_cursor) strcpy(m_s,"  ");   else snprintf(m_s,8,"%02d",edit_time.month);
+            if (mode==3 && !show_cursor) strcpy(d_s,"  ");   else snprintf(d_s,8,"%02d",edit_time.date);
+            if (mode==4 && !show_cursor) strcpy(hr_s,"  ");  else snprintf(hr_s,8,"%02d",edit_time.hours);
             if (mode==5 && !show_cursor) strcpy(min_s,"  "); else snprintf(min_s,8,"%02d",edit_time.minutes);
             if (mode==6 && !show_cursor) strcpy(sec_s,"  "); else snprintf(sec_s,8,"%02d",edit_time.seconds);
             int wd = Get_Weekday(edit_time.year, edit_time.month, edit_time.date);
+            
             Safe_Print_OLED(0,  "     *** SET RTC TIME ***");
             Safe_Print_OLED(16, "       %s/%s/%s (%s)", y_s, m_s, d_s, week_str[wd]);
             Safe_Print_OLED(32, "         %s:%s:%s", hr_s, min_s, sec_s);
             Safe_Print_OLED(48, " R:Next G:+ B:- Y:Cancel");
         }
-        OLED_Update();
+        UI_Update();
+
         
-        uint8_t btn_exit=(PF->PIN & BIT5)?1:0, btn_next=(PA->PIN & BIT8)?1:0, btn_plus=(PF->PIN & BIT4)?1:0, btn_minus=(PF->PIN & BIT3)?1:0;
+        uint8_t btn_exit=(PF->PIN & BIT5)?1:0, btn_next=(PF->PIN & BIT14)?1:0, btn_plus=(PF->PIN & BIT4)?1:0, btn_minus=(PF->PIN & BIT3)?1:0;
         if (btn_exit == 0 && last_yellow == 1) { JigBeep(100); if (mode == 0) break; else mode = 0; }
         if (btn_next == 0 && last_red == 1) {
             JigBeep(50);
@@ -661,7 +744,6 @@ void RTC_Time_Date_Loop(void) {
         Delay_ms(15);
     }
 }
-
 void Stopwatch_Loop(void) {
     uint8_t last_red=1, last_blue=1, last_yellow=1;
     while(1) {
@@ -670,13 +752,13 @@ void Stopwatch_Loop(void) {
         uint32_t s = (g_u32StopwatchMs / 1000) % 60;
         uint32_t m = (g_u32StopwatchMs / 60000) % 60;
         uint32_t h = (g_u32StopwatchMs / 3600000) % 100;
-        OLED_Clear();
+        UI_Clear();
         Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "      --- STOPWATCH ---");
         Safe_Print_OLED_Smooth(24, 0, 63, 0x0F, "       %02d:%02d:%02d:%03d", h, m, s, ms);
-        Safe_Print_OLED_Smooth(48, 0, 63, 0x08, " R:Start/Stop  B:Rst  Y:Back");
-        OLED_Update();
+        Safe_Print_OLED_Smooth(48, 0, 63, 0x08, " W:Start/Stop  W:Rst  Y:Back");
+        UI_Update();
 
-        uint8_t red=(PA->PIN & BIT8)?1:0, blue=(PF->PIN & BIT3)?1:0, yellow=(PF->PIN & BIT5)?1:0;
+        uint8_t red=(PF->PIN & BIT14)?1:0, blue=(PF->PIN & BIT3)?1:0, yellow=(PF->PIN & BIT5)?1:0;
         if (red == 0 && last_red == 1) { JigBeep(50); g_u8StopwatchRunning = !g_u8StopwatchRunning; }
         if (blue == 0 && last_blue == 1) { JigBeep(50); g_u32StopwatchMs = 0; }
         if (yellow == 0 && last_yellow == 1) { JigBeep(100); break; }
@@ -694,7 +776,7 @@ void Alarm_Menu_Loop(void) {
         Global_Background_Tasks(); 
         if (g_force_alarm_menu && !g_alarm_triggered) g_force_alarm_menu = 0; 
         blink_timer++; if (blink_timer > 10) { show_cursor = !show_cursor; blink_timer = 0; }
-        OLED_Clear();
+        UI_Clear();
         
         int p_idx = (current_idx - 1 + 6) % 6; int n_idx = (current_idx + 1) % 6;
         char buf[32];
@@ -713,10 +795,10 @@ void Alarm_Menu_Loop(void) {
         Safe_Print_OLED_Smooth(16, 0, 63, 0x0F, buf);
         snprintf(buf, 32, "  %d. [%02d:%02d:%02d] (%s)", n_idx+1, g_alarms[n_idx].hours, g_alarms[n_idx].minutes, g_alarms[n_idx].seconds, g_alarms[n_idx].enabled?"ON ":"OFF");
         Safe_Print_OLED_Smooth(32, 0, 63, 0x04, buf);
-        Safe_Print_OLED_Smooth(48, 0, 63, 0x08, " Blk:ON/OFF R:Set Y:Back");
-        OLED_Update();
+        Safe_Print_OLED_Smooth(48, 0, 63, 0x08, " Blk:ON/OFF W:Set Y:Back");
+        UI_Update();
 
-        uint8_t red=(PA->PIN&BIT8)?1:0, blue=(PF->PIN&BIT3)?1:0, green=(PF->PIN&BIT4)?1:0, yellow=(PF->PIN&BIT5)?1:0, black=(PF->PIN&BIT6)?1:0;
+        uint8_t red=(PF->PIN&BIT14)?1:0, blue=(PF->PIN&BIT3)?1:0, green=(PF->PIN&BIT4)?1:0, yellow=(PF->PIN&BIT5)?1:0, black=(PF->PIN&BIT6)?1:0;
         if (mode == 0) {
             if (red==0 && last_red==1) { JigBeep(50); mode=1; show_cursor=1; blink_timer=0; }
             if (blue==0 && last_blue==1) { JigBeep(50); current_idx = (current_idx + 1) % 6; }
@@ -751,14 +833,14 @@ void Time_Set_Menu_Loop(void) {
     while(1) {
         Global_Background_Tasks();
         if (g_force_alarm_menu) { idx = 2; Alarm_Menu_Loop(); continue; } // 自動導航到鬧鐘
-        OLED_Clear();
-        Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "      --- TIME SET ---");
+        UI_Clear();
+        Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "    --- TIME SET ---      R:Next");
         Safe_Print_OLED_Smooth(16, 16, 63, (idx==0)?0x0F:0x04, "%s 1. Time & Date", (idx==0)?">":" ");
         Safe_Print_OLED_Smooth(32, 16, 63, (idx==1)?0x0F:0x04, "%s 2. Stopwatch", (idx==1)?">":" ");
-        Safe_Print_OLED_Smooth(48, 16, 63, (idx==2)?0x0F:0x04, "%s 3. Alarms", (idx==2)?">":" ");
-        OLED_Update();
+        Safe_Print_OLED_Smooth(48, 16, 63, (idx==2)?0x0F:0x04, "%s 3. Alarms" , (idx==2)?">":" "); 
+        UI_Update();
 
-        uint8_t red=(PA->PIN&BIT8)?1:0, blue=(PF->PIN&BIT3)?1:0, green=(PF->PIN&BIT4)?1:0, yellow=(PF->PIN&BIT5)?1:0;
+        uint8_t red=(PA->PIN& BIT8)?1:0, blue=(PF->PIN&BIT3)?1:0, green=(PF->PIN&BIT4)?1:0, yellow=(PF->PIN&BIT5)?1:0;
         if (blue == 0 && last_blue == 1) { JigBeep(50); idx = (idx+1)%3; }
         if (green == 0 && last_green == 1) { JigBeep(50); idx = (idx-1+3)%3; }
         if (red == 0 && last_red == 1) {
@@ -777,12 +859,17 @@ void Time_Set_Menu_Loop(void) {
 // [各式監控 UI 介面]
 // =======================================================
 void UART_Monitor_Test(uint32_t u32BaudRate) {
-    UART_DisableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk); Interface_init(); PB4 = 1;               
+    UART_DisableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk); Interface_init(); PB4 = 1;                
     UART_Open(UART2, u32BaudRate); UART2->FIFO = (UART2->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE;
     UART_EnableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
     char title_buf[32]; snprintf(title_buf, sizeof(title_buf), "UART2 Mntr %u", u32BaudRate);
     Show_Test_Start_Screen(title_buf); 
-    int rx_count = 0; char rx_buf[128] = {0}; uint32_t loop_tick = 1000; int power_state = 0;
+    
+    int rx_count = 0; 
+    static char rx_buf[128];
+    memset(rx_buf, 0, sizeof(rx_buf));
+    
+    uint32_t loop_tick = 1000; int power_state = 0;
 
     while(1) {
         Global_Background_Tasks(); if (g_force_alarm_menu) break; 
@@ -800,13 +887,16 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
         if (loop_tick >= 1000) { Update_Dashboard_Display(power_state, rx_count, rx_buf); loop_tick = 0; }
         Delay_ms(1); loop_tick++;
     }
-    PC->DOUT &= ~BIT7; OLED_Clear(); Safe_Print_OLED(0, "Monitor End"); OLED_Update(); Delay_ms(1000);
+    PC->DOUT &= ~BIT7; UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
 
 void Wiegand_Monitor_Test(void) {
     Interface_init(); PB6 = 1; PA11 = 1; GPIO_SetMode(PA, BIT10, GPIO_MODE_QUASI); GPIO_SetMode(PB, BIT5, GPIO_MODE_QUASI); GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5);
     Show_Test_Start_Screen("Wiegand Monitor"); 
-    int rx_count = 0; uint32_t loop_tick = 1000; int power_state = 0; uint64_t last_wg_data = 0; char data_str[32] = {0};
+    int rx_count = 0; uint32_t loop_tick = 1000; int power_state = 0; uint64_t last_wg_data = 0; 
+    
+    static char data_str[32];
+    memset(data_str, 0, sizeof(data_str));
 
     while(1) {
         Global_Background_Tasks(); if (g_force_alarm_menu) break;
@@ -823,7 +913,7 @@ void Wiegand_Monitor_Test(void) {
         }
         Delay_ms(1); loop_tick++;
     }
-    PC->DOUT &= ~BIT7; GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); OLED_Clear(); Safe_Print_OLED(0, "Monitor End"); OLED_Update(); Delay_ms(1000);
+    PC->DOUT &= ~BIT7; GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
 
 void Decode_TK2_Raw(char* out_str) {
@@ -835,7 +925,10 @@ void Decode_TK2_Raw(char* out_str) {
 void TK2_Monitor_Test(void) {
     Interface_init(); PB7 = 1; PA11 = 1; GPIO_SetMode(PA, BIT10, GPIO_MODE_QUASI); GPIO_SetMode(PB, BIT5, GPIO_MODE_QUASI); GPIO_SetMode(PB, BIT8, GPIO_MODE_QUASI); GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5);  GPIO_DisableInt(PB, 8);
     Show_Test_Start_Screen("TK2 Monitor");
-    int rx_count = 0; uint32_t loop_tick = 1000; int power_state = 0; uint8_t last_tk2_cnt = 0; uint32_t tk2_idle_tick = 0; char tk2_str[64] = "WAITING...";
+    int rx_count = 0; uint32_t loop_tick = 1000; int power_state = 0; uint8_t last_tk2_cnt = 0; uint32_t tk2_idle_tick = 0; 
+    
+    static char tk2_str[64];
+    strcpy(tk2_str, "WAITING...");
 
     while(1) {
         Global_Background_Tasks(); if (g_force_alarm_menu) break;
@@ -851,11 +944,11 @@ void TK2_Monitor_Test(void) {
         if (loop_tick >= 1000) { Update_Dashboard_Display(power_state, rx_count, tk2_str); loop_tick = 0; }
         Delay_ms(1); loop_tick++;
     }
-    PC->DOUT &= ~BIT7; GPIO_DisableInt(PB, 5); OLED_Clear(); Safe_Print_OLED(0, "Monitor End"); OLED_Update(); Delay_ms(1000);
+    PC->DOUT &= ~BIT7; GPIO_DisableInt(PB, 5); UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
 
 void UART1_JIG_8CP_Test(void) {
-    OLED_Clear(); Safe_Print_OLED(0, "UART1 JIG_8CP"); Safe_Print_OLED(16, "Red Btn -> TX"); Safe_Print_OLED(32, "Wait RX Cmd:01..."); Safe_Print_OLED(48, "Yellow(Exit)->Back"); OLED_Update();
+    UI_Clear(); Safe_Print_OLED(0, "UART1 JIG_8CP"); Safe_Print_OLED(16, "Red Btn -> TX"); Safe_Print_OLED(32, "Wait RX Cmd:01..."); Safe_Print_OLED(48, "Yellow(Exit)->Back"); UI_Update();
     __disable_irq(); g_u1_rx_head = 0; g_u1_rx_tail = 0; __enable_irq();
 
     while(1) {
@@ -864,7 +957,7 @@ void UART1_JIG_8CP_Test(void) {
             Delay_ms(50);
             if ((PA->PIN & BIT8) == 0) {
                 JigForceBeep(50); JIG_8CP_Send_Packet("SC", "ABCD123");
-                OLED_Clear(); Safe_Print_OLED(0, "--- JIG_8CP TX ---"); Safe_Print_OLED(16, "Cmd : SC (HID)"); Safe_Print_OLED(32, "Data: ABCD123"); OLED_Update();
+                UI_Clear(); Safe_Print_OLED(0, "--- JIG_8CP TX ---"); Safe_Print_OLED(16, "Cmd : SC (HID)"); Safe_Print_OLED(32, "Data: ABCD123"); UI_Update();
                 while ((PA->PIN & BIT8) == 0) { Delay_ms(10); } Delay_ms(1000);
             }
         }
@@ -885,8 +978,9 @@ int main(void) {
     HID_Init(); NVIC_EnableIRQ(USBD_IRQn); USBD_Start();
     OLED_Force_Reset(); vOLED_INIT(); vINA237_Init(); set237Calibration_1A(); RV3028_Init();
     
-    OLED_Clear(); Safe_Print_OLED(0, "System Ready"); Safe_Print_OLED(16, "JIG-8FT-P1 OK"); OLED_Update();
-    JigBeep(500); Delay_ms(100); JigBeep(500); Delay_ms(1000);
+    UI_Clear(); Safe_Print_OLED(0, "System Ready"); Safe_Print_OLED(16, "JIG-8FT-P1 OK"); Safe_Print_OLED(32, "--- BALLY ---"); UI_Update();
+
+		JigBeep(500); Delay_ms(100); JigBeep(500); Delay_ms(1000);
     
     const char *menu_items[] = { "RS232 Monitor", "Wiegand", "TK2", "Time Set", "Buzzer Settings", "USBHID SET", "UART1 JIG_8CP" };
     const int NUM_ITEMS = sizeof(menu_items) / sizeof(menu_items[0]); int current_idx = 1; 
@@ -899,15 +993,15 @@ int main(void) {
         Global_Background_Tasks(); 
         if (g_force_alarm_menu) { current_idx = 3; Time_Set_Menu_Loop(); continue; }
 
-        UI_Draw_Menu_State("Select Function (V5.3.2)", menu_items, NUM_ITEMS, current_idx);
+        UI_Draw_Menu_State("Select Function (V5.3.6)", menu_items, NUM_ITEMS, current_idx);
         int selected = 0;
 
         while(1) {
             Global_Background_Tasks(); 
             if (g_force_alarm_menu) { selected = 2; break; }
 
-            if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { JigBeep(50); UI_Menu_Scroll_Anim_Smooth("Select Function (V5.3.2)", menu_items, NUM_ITEMS, current_idx, 1); current_idx = (current_idx + 1) % NUM_ITEMS; while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; } }
-            if((PF->PIN & BIT4) == 0) { Delay_ms(50); if((PF->PIN & BIT4) == 0) { JigBeep(50); UI_Menu_Scroll_Anim_Smooth("Select Function (V5.3.2)", menu_items, NUM_ITEMS, current_idx, -1); current_idx = (current_idx - 1 + NUM_ITEMS) % NUM_ITEMS; while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; } }
+            if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { JigBeep(50); UI_Menu_Scroll_Anim_Smooth("Select Function (V5.3.6)", menu_items, NUM_ITEMS, current_idx, 1); current_idx = (current_idx + 1) % NUM_ITEMS; while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; } }
+            if((PF->PIN & BIT4) == 0) { Delay_ms(50); if((PF->PIN & BIT4) == 0) { JigBeep(50); UI_Menu_Scroll_Anim_Smooth("Select Function (V5.3.6)", menu_items, NUM_ITEMS, current_idx, -1); current_idx = (current_idx - 1 + NUM_ITEMS) % NUM_ITEMS; while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; } }
             if((PF->PIN & BIT5) == 0) { Delay_ms(50); if((PF->PIN & BIT5) == 0) { JigBeep(200); while((PF->PIN & BIT5) == 0) { Delay_ms(10); } selected = 1; break; } }
         }
 
@@ -935,9 +1029,9 @@ int main(void) {
                 int exit_buzzer = 0;
                 while(1) {
                     Global_Background_Tasks(); if (g_force_alarm_menu) break;
-                    OLED_Clear(); Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "Buzzer Settings");
+                    UI_Clear(); Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "Buzzer Settings");
                     if (g_u8BuzzerEnabled) Safe_Print_OLED_Smooth(16, 16, 63, 0x0F, "  Current: ON "); else Safe_Print_OLED_Smooth(16, 16, 63, 0x04, "  Current: OFF");
-                    Safe_Print_OLED_Smooth(32, 16, 63, 0x08, " Blue(-) -> Turn ON"); Safe_Print_OLED_Smooth(48, 16, 63, 0x08, " Green(+) -> Turn OFF"); OLED_Update();
+                    Safe_Print_OLED_Smooth(32, 16, 63, 0x08, " Blue(-) -> Turn ON"); Safe_Print_OLED_Smooth(48, 16, 63, 0x08, " Green(+) -> Turn OFF"); UI_Update();
                     
                     while(1) {
                         Global_Background_Tasks(); if (g_force_alarm_menu) { exit_buzzer = 1; break; }
@@ -952,16 +1046,16 @@ int main(void) {
                 int exit_usb_test = 0;
                 while(1) {
                     Global_Background_Tasks(); if (g_force_alarm_menu) break;
-                    OLED_Clear(); Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "USBHID SET");
+                    UI_Clear(); Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "USBHID SET");
                     Safe_Print_OLED_Smooth(16, 16, 63, g_u8UsbHidAppendCR ? 0x0F : 0x04, " Add CR  : %s", g_u8UsbHidAppendCR ? "ON " : "OFF");
                     Safe_Print_OLED_Smooth(32, 16, 63, g_u8UsbHidSmartCaps ? 0x0F : 0x04, " SyncCaps: %s", g_u8UsbHidSmartCaps ? "ON " : "OFF");
-                    Safe_Print_OLED_Smooth(48, 16, 63, 0x04, " G:CR B:Caps R:Test"); OLED_Update();
+                    Safe_Print_OLED_Smooth(48, 16, 63, 0x04, " G:CR B:Caps R:Test"); UI_Update();
                     
                     while(1) {
                         Global_Background_Tasks(); if (g_force_alarm_menu) { exit_usb_test = 1; break; }
                         if((PF->PIN & BIT4) == 0) { Delay_ms(50); if((PF->PIN & BIT4) == 0) { g_u8UsbHidAppendCR = !g_u8UsbHidAppendCR; JigBeep(50); while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; } }
                         if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { g_u8UsbHidSmartCaps = !g_u8UsbHidSmartCaps; JigBeep(50); while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; } }
-                        if((PA->PIN & BIT8) == 0) { Delay_ms(50); if((PA->PIN & BIT8) == 0) { JigForceBeep(50); OLED_Clear(); Safe_Print_OLED_Smooth(16, 16, 63, 0x0F, " Sending via USB..."); OLED_Update(); USBHID_Enqueue_String("BALLY-chou_test_0429"); OLED_Clear(); Safe_Print_OLED_Smooth(16, 16, 63, 0x0F, " Send Success!"); OLED_Update(); Delay_ms(1000); while((PA->PIN & BIT8) == 0) { Delay_ms(10); } break; } }
+                        if((PA->PIN & BIT8) == 0) { Delay_ms(50); if((PA->PIN & BIT8) == 0) { JigForceBeep(50); UI_Clear(); Safe_Print_OLED_Smooth(16, 16, 63, 0x0F, " Sending via USB..."); UI_Update(); USBHID_Enqueue_String("BALLY-chou_test_0429"); UI_Clear(); Safe_Print_OLED_Smooth(16, 16, 63, 0x0F, " Send Success!"); UI_Update(); Delay_ms(1000); while((PA->PIN & BIT8) == 0) { Delay_ms(10); } break; } }
                         if(Check_Exit_Button()) { exit_usb_test = 1; break; }
                     }
                     if (exit_usb_test == 1) break;
