@@ -47,10 +47,19 @@ int IsLeapYear(uint16_t year) {
 
 // 初始化 RV3028
 void RV3028_Init(void) {
-    // 預設將 24 小時制開啟 (Control 1 Register 0x0F, bit 1)
-    uint8_t ctrl1 = RV3028_ReadReg(0x0F);
-    ctrl1 |= (1 << 1); 
-    RV3028_WriteReg(0x0F, ctrl1);
+// 假設您有 RV3028_ReadReg 與 RV3028_WriteReg 函式
+uint8_t backup_reg = RV3028_ReadReg(0x37);
+
+// 清除 Bit 3 和 Bit 2
+backup_reg &= ~(0x0C); 
+
+// 設定 Bit 3:2 為 11 (Level Switching Mode - 自動切換備用電池)
+backup_reg |= (0x0C);  
+
+// 如果您使用的是「超級電容 (Supercap)」或「可充電電池」，還需要打開 TCE (涓流充電 Bit 5)
+// backup_reg |= (1 << 5); // 取消此行註解以開啟充電
+
+RV3028_WriteReg(0x37, backup_reg);
 }
 
 // 設定時間
