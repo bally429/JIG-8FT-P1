@@ -10,14 +10,14 @@
  * V5.3.1 (2026/06/30): 補回遺漏的 UI 繪圖與儀表板更新函式，修復編譯錯誤。
  * V5.3.3 (2026/06/30): [重大架構升級] USB HID 全面改為「非同步佇列 (Ring Buffer) 背景發送」。
  * V5.3.4 (2026/07/02): 刪除 UART0 相關程式碼 暫時無用到。
- * V5.3.6 (2026/07/02): [架構解耦] 引入 VRAM 虛擬顯存引擎，將 vsnprintf 運算與 OLED 硬體 I/O 徹底分離。
- * 結合臨界區 (Critical Section) 保護與修正 Dashboard 字串越界問題，終結 CAPS/NUM 按鍵造成的死機。
- * V5.3.7 (2026/07/07): [通訊與儲存升級] 
- * 1. 刪除 Flash 寫入功能，徹底規避寫入死機風險。
- * 2. 實作 Alarm 儲存與讀取協定 (AS/AL 指令)，由 ESP32 SD 卡負責儲存鬧鐘設定。
- * 3. 新增 Power Sync 協定 (PW 指令)，確保實體按鍵與 WEB 頁面電源狀態同步。
- * V5.3.8 (2026/07/07): [通訊與儲存升級]  
- * 1. 修正WIFI CMD 遺漏 及 新增FIRMWARE_VERSION 統一管理
+ * V5.3.6 (2026/07/02): [架構解耦] 引入 VRAM 虛擬顯存引擎，將 vsnprintf 運算與 OLED 硬體徹底分離。
+ * V5.3.7 (2026/07/07): [通訊與儲存] 刪除 Flash 寫入，實作 Alarm 儲存與讀取協定 (AS/AL 指令)。
+ * V5.3.8 (2026/07/07): [通訊與儲存] 修正 WIFI CMD 遺漏 及 新增 FIRMWARE_VERSION 統一管理。
+ * V5.3.9 (2026/07/08): [電源狀態全域同步] 
+ * 1. 解決 WEB 發送 PWON 時，OLED 畫面與電流平均值 (AVG) 無法同步更新的問題。
+ * 2. 重構 Check_Power_Toggle 引入虛擬實體按鈕機制 (g_web_power_toggle_req)。
+ * 3. 實作 Scenario 3，實體按鍵觸發時主動推播 PWON/PWOFF 給 ESP32。
+ * 4. 實作 Scenario 4，支援 ESP32 詢問 PW? 時回傳真實狀態。
  * ===========================================================================================
  */
 
@@ -33,7 +33,7 @@
 // =======================================================
 // [系統版本控制]
 // =======================================================
-#define FIRMWARE_VERSION "V5.3.8"
+#define FIRMWARE_VERSION "V5.3.9"
 
 // =======================================================
 // [系統全域設定與變數]
@@ -49,11 +49,15 @@ volatile uint32_t g_u32SystemMs = 0;
 volatile uint32_t g_u32StopwatchMs = 0;
 volatile uint8_t g_u8StopwatchRunning = 0;
 volatile uint8_t g_force_alarm_menu = 0; 
+
 // =======================================================
-// [WIFI 與通訊狀態變數]
+// [WIFI 與通訊、電源狀態變數] (V5.3.9 升級)
 // =======================================================
 char g_szWifiIP[20] = "";
 uint8_t g_u8WifiConnected = 0;
+
+volatile int g_power_state = 0;          // 記錄當前物理電源真實狀態
+volatile int g_web_power_toggle_req = 0; // 網頁端發來的電源控制請求 (0:無, 1:要求ON, 2:要求OFF)
 
 // =======================================================
 // [V5.3.3] USB HID 專用非同步發送緩衝區 (Ring Buffer)
@@ -117,6 +121,7 @@ void Delay_ms(uint32_t ms);
 void Delay_us(uint32_t us); 
 void JigForceBeep(uint32_t ms); 
 void JigBeep(uint32_t ms);      
+void JIG_8CP_Send_Packet(const char* cmd_code, const char* data);
 
 // [V5.3.6 架構升級 API]
 void UI_Clear(void);
@@ -144,7 +149,7 @@ void Internal_Send_Char_HID(char c);
 #define CURRENT_FILTER_SIZE 50 
 float g_fCurrentBuffer[CURRENT_FILTER_SIZE] = {0};
 uint8_t g_u8CurrentFilterIdx = 0;
-uint8_t g_u8FilterFilled = 0;
+uint8_t g_u8FilterFilled = 1;
 float g_fCurrentAvg = 0.0f; 
 float g_fMaxCurrent = 0.0f;
 float g_fMinCurrent = 9999.0f;
@@ -166,7 +171,7 @@ void Reset_Current_Filter(void) {
 }
 
 // =======================================================
-// [核心按鍵與共用 UI 模組]
+// [核心按鍵與共用 UI 模組 - V5.3.9 四大情境同步引擎]
 // =======================================================
 int Check_Exit_Button(void) {
     if((PF->PIN & BIT5) == 0) { Delay_ms(50); if((PF->PIN & BIT5) == 0) { JigBeep(200); while((PF->PIN & BIT5)==0){} return 1; } } return 0;
@@ -174,8 +179,42 @@ int Check_Exit_Button(void) {
 int Check_Reset_Button(void) {
     if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { JigBeep(50); g_fMaxCurrent = 0.0f; g_fMinCurrent = 9999.0f; while((PF->PIN & BIT3)==0){} return 1; } } return 0;
 }
+
 int Check_Power_Toggle(int *power_state) {
-    if ((PA->PIN & BIT8) == 0) { Delay_ms(50); if ((PA->PIN & BIT8) == 0) { *power_state = !(*power_state); while ((PA->PIN & BIT8) == 0) {} Delay_ms(50); return 1; } } return 0;
+    // 1. 偵測實體 Red 按鈕
+    if ((PA->PIN & BIT8) == 0) {
+        Delay_ms(50);
+        if ((PA->PIN & BIT8) == 0) {
+            *power_state = !(*power_state);
+            g_power_state = *power_state; // 同步全域
+            while ((PA->PIN & BIT8) == 0) {}
+            Delay_ms(50);
+            
+            // 【情境 3】操作員按了實體按鈕，主動推播狀態給 ESP32 以 0 秒差同步網頁
+            JIG_8CP_Send_Packet("PW", *power_state ? "ON" : "OFF");
+            return 1;
+        }
+    }
+    
+    // 2. 偵測網頁發送的軟體控制請求 (虛擬按鈕)
+    if (g_web_power_toggle_req == 1 && *power_state == 0) {
+        // 【情境 1】網頁要求 ON，且目前是 OFF
+        *power_state = 1;
+        g_power_state = 1;
+        g_web_power_toggle_req = 0; // 消費請求
+        return 1; // 假裝按下了實體按鈕，觸發後續 Setup 邏輯
+    }
+    if (g_web_power_toggle_req == 2 && *power_state == 1) {
+        // 【情境 2】網頁要求 OFF，且目前是 ON
+        *power_state = 0;
+        g_power_state = 0;
+        g_web_power_toggle_req = 0; // 消費請求
+        return 1; // 假裝按下了實體按鈕，觸發後續 Setup 邏輯
+    }
+    
+    // 防呆：清除重複或無效的狀態要求
+    g_web_power_toggle_req = 0; 
+    return 0;
 }
 
 void Process_Background_Sampling(int power_state, uint32_t loop_tick) {
@@ -212,7 +251,7 @@ void Update_Dashboard_Display(int power_state, int rx_count, const char* specifi
     if (inst_current == 0.0f) { set237Calibration_1A(); inst_current = getCurrent_mA(); }
         
     static char l_buf[32], r_buf[32];
-    static char r_data[132]; // [V5.3.6 FIX] 容量必須大於 RS232 的最大可能長度 128
+    static char r_data[132];
     
     UI_Clear();
     snprintf(l_buf, sizeof(l_buf), "AVG:%.1fmA", g_fCurrentAvg);
@@ -226,14 +265,13 @@ void Update_Dashboard_Display(int power_state, int rx_count, const char* specifi
     snprintf(l_buf, sizeof(l_buf), "%.2fV", voltage);
     Safe_Print_OLED(32, "%-16s[Power:%s]", l_buf, power_state?"ON ":"OFF");
     
-    // [V5.3.6 FIX] 使用 memset 安全清空，防禦越界掃描
     memset(r_data, 0, sizeof(r_data));
     if(strlen(specific_data_str) > 0 && rx_count >= 0) {
         snprintf(r_data, sizeof(r_data), "%02d/%s", rx_count, specific_data_str);
     } else {
         snprintf(r_data, sizeof(r_data), "%s", specific_data_str);
     }
-    snprintf(r_buf, sizeof(r_buf), "%.16s", r_data); // 嚴格限制印出長度
+    snprintf(r_buf, sizeof(r_buf), "%.16s", r_data); 
     snprintf(l_buf, sizeof(l_buf), "                "); 
 
     Safe_Print_OLED(48, "%-16s%s", l_buf, r_buf); 
@@ -263,7 +301,6 @@ void UI_Clear(void) {
 }
 
 void UI_Update(void) {
-    // ?? 關鍵保護：物理傳輸期間完全鎖定 USB 中斷，徹底保護 I2C/SPI 時序
     NVIC_DisableIRQ(USBD_IRQn);
     OLED_Clear();
     for(int i = 0; i < MAX_VRAM_LINES; i++) {
@@ -272,7 +309,7 @@ void UI_Update(void) {
         }
     }
     OLED_Update();
-    NVIC_EnableIRQ(USBD_IRQn); // ?? 傳輸結束，釋放中斷
+    NVIC_EnableIRQ(USBD_IRQn);
 }
 
 void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, const char *fmt, ...) {
@@ -280,13 +317,12 @@ void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, con
     for(int i = 0; i < MAX_VRAM_LINES; i++) {
         if(!g_vram[i].active) { idx = i; break; }
     }
-    if(idx == -1) return; // 緩衝區滿了則丟棄本次渲染
+    if(idx == -1) return; 
 
     char temp_buf[128];
     va_list argptr;
     va_start(argptr, fmt);
     
-    // ?? 關鍵保護：鎖住中斷保護 vsnprintf，根除微型函式庫重入 (Re-entrancy) Bug
     NVIC_DisableIRQ(USBD_IRQn);
     vsnprintf(temp_buf, sizeof(temp_buf), fmt, argptr);
     NVIC_EnableIRQ(USBD_IRQn);
@@ -307,11 +343,10 @@ void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, con
     g_vram[idx].min_y = min_y;
     g_vram[idx].max_y = max_y;
     g_vram[idx].brightness = brightness;
-    g_vram[idx].active = 1; // 標記此行需要渲染
+    g_vram[idx].active = 1;
 }
 
 void Safe_Print_OLED(int y, const char *fmt, ...) {
-    // 代理給 Smooth 函式，預設滿版與最高亮度
     char temp_buf[33];
     va_list argptr;
     va_start(argptr, fmt);
@@ -371,18 +406,16 @@ void Handle_Alarm_Trigger(void) {
     UI_Update();
 
     while(g_alarm_triggered) {
-        Process_UART1_JIG_8CP_Parser(); // 維持 UART 背景接收能力
-        USBHID_Process_Queue(); // 同時維持背景發送
+        Process_UART1_JIG_8CP_Parser(); 
+        USBHID_Process_Queue(); 
         uint32_t elapsed = g_u32SystemMs - start_ms;
-        if (elapsed > 60000) { g_alarm_triggered = 0; break; } // 1分鐘超時自動停止
+        if (elapsed > 60000) { g_alarm_triggered = 0; break; } 
 
-        // 每兩秒發出4短聲
         if (g_u32SystemMs - beep_timer > 2000) {
             for(int i=0; i<4; i++) { JigForceBeep(60); Delay_ms(60); }
             beep_timer = g_u32SystemMs;
         }
 
-        // 按任意鍵停止
         if ((PA->PIN & BIT8)==0 || (PF->PIN & (BIT3|BIT4|BIT5|BIT6)) != (BIT3|BIT4|BIT5|BIT6)) {
             JigBeep(50);
             g_alarm_triggered = 0;
@@ -390,18 +423,14 @@ void Handle_Alarm_Trigger(void) {
             break;
         }
     }
-    g_force_alarm_menu = 1; // 強制導航回鬧鐘選單
+    g_force_alarm_menu = 1; 
 }
 
 
 void Global_Background_Tasks(void) {
-    // 1. 全域背景處理 UART1 封包
     Process_UART1_JIG_8CP_Parser();
-    
-    // 2. [V5.3.3] 全域處理 USB HID 佇列發送 (核心解耦技術)
     USBHID_Process_Queue();
     
-    // 3. 全域背景檢查鬧鐘
     static uint32_t s_last_rtc_read = 0;
     if (g_u32SystemMs - s_last_rtc_read >= 500) {
         s_last_rtc_read = g_u32SystemMs; 
@@ -421,7 +450,6 @@ void Global_Background_Tasks(void) {
         }
     }
     
-    // 4. 觸發鬧鐘畫面攔截
     if (g_alarm_triggered) { Handle_Alarm_Trigger(); }
 }
 
@@ -436,14 +464,13 @@ const char* week_str[] = {"Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri"};
 // =======================================================
 // [V5.3.3 新架構：USB HID 非同步佇列與發送引擎]
 // =======================================================
-// 1. 將資料丟入緩衝區 (非阻塞，瞬間完成)
 void USBHID_Enqueue_Data(const char* str) {
     while(*str) {
         uint16_t next = (g_hid_head + 1) % HID_TX_BUF_SIZE;
         if (next != g_hid_tail) {
             g_hid_tx_buf[g_hid_head] = *str++;
             g_hid_head = next;
-        } else break; // 緩衝區滿了則丟棄
+        } else break; 
     }
 }
 
@@ -451,15 +478,14 @@ void USBHID_Enqueue_String(const char* str) {
     while(*str) {
         uint16_t next = (g_hid_head + 1) % HID_TX_BUF_SIZE;
         if (next != g_hid_tail) { g_hid_tx_buf[g_hid_head] = *str++; g_hid_head = next; } 
-        else break; // Buffer full
+        else break; 
     }
-    // 若設定補 CR
     if (g_u8UsbHidAppendCR) {
         uint16_t next = (g_hid_head + 1) % HID_TX_BUF_SIZE;
         if (next != g_hid_tail) { g_hid_tx_buf[g_hid_head] = 0x0D; g_hid_head = next; }
     }
 }
-// 3. 底層觸發鍵盤按壓
+
 int Trigger_USB_HID_Key(uint8_t mod, uint8_t key) {
     uint8_t report[8] = {0}; report[0] = mod; report[2] = key;
     uint32_t timeout = 0;
@@ -469,7 +495,6 @@ int Trigger_USB_HID_Key(uint8_t mod, uint8_t key) {
     return 1; 
 }
 
-// 4. 解析單一字元，並發送
 void Internal_Send_Char_HID(char c) {
     uint8_t is_caps_on = (g_u8UsbHidSmartCaps && (g_u8Led_Status[0] & 0x02)) ? 1 : 0; 
     uint8_t mod = 0; uint8_t key = 0; 
@@ -489,17 +514,12 @@ void Internal_Send_Char_HID(char c) {
     }
 }
 
-// 5. 在 Global_Background_Tasks 中被呼叫的背景發送處理器
 void USBHID_Process_Queue(void) {
-    if (g_hid_head == g_hid_tail) return; // 佇列是空的
-    
-    // 如果 USB 通道空閒，就取出一個字元發送
+    if (g_hid_head == g_hid_tail) return; 
     if (g_u8EP2Ready) {
         char c = g_hid_tx_buf[g_hid_tail];
         g_hid_tail = (g_hid_tail + 1) % HID_TX_BUF_SIZE;
         Internal_Send_Char_HID(c);
-        
-        // 當發送完最後一個字元時，發出提示音
         if (g_hid_head == g_hid_tail) {
             JigBeep(100);
         }
@@ -530,21 +550,17 @@ void JIG_8CP_Send_Packet(const char* cmd_code, const char* data) {
 
 void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
     if (strcmp(cmd_code, "SC") == 0) {
-        // 收到條碼，瞬間丟進背景佇列發送
         USBHID_Enqueue_String(data); 
     }
     else if (strcmp(cmd_code, "V") == 0) {
-				// 收到版本請求，直接引用巨集
         JIG_8CP_Send_Packet("V", FIRMWARE_VERSION);
     }
-		else if (strcmp(cmd_code, "WI") == 0) {
-        // 收到 ESP32 回傳的 IP
+    else if (strcmp(cmd_code, "WI") == 0) {
         strncpy(g_szWifiIP, data, sizeof(g_szWifiIP) - 1);
         g_szWifiIP[sizeof(g_szWifiIP) - 1] = '\0';
         g_u8WifiConnected = 1;
     }
     else if (strcmp(cmd_code, "AL") == 0) {
-        // [新增] 接收 ESP32 讀取 SD 卡後傳來的鬧鐘 (例如: AL0,12,30,00,1)
         int idx = 0, h = 0, m = 0, s = 0, en = 0;
         if (sscanf(data, "%d,%d,%d,%d,%d", &idx, &h, &m, &s, &en) == 5) {
             if (idx >= 0 && idx < 6) {
@@ -555,13 +571,19 @@ void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
             }
         }
     }
+    // 【四大情境解耦接收區】 - V5.3.9 升級
     else if (strcmp(cmd_code, "PW") == 0) {
-        // [新增] 接收 ESP32 WEB 按鈕傳來的電源控制
-        if (strstr(data, "ON") != NULL) {
-            PC->DOUT |= BIT7; // 物理開啟電源
+        if (strcmp(data, "?") == 0) {
+            // 情境 4：網頁剛開啟 (狀態查詢) - 據實回報
+            JIG_8CP_Send_Packet("PW", g_power_state ? "ON" : "OFF");
+        }
+        else if (strstr(data, "ON") != NULL) {
+            // 情境 1：網頁請求 ON (可能為 PWPA8ON 或單純 PWON)
+            g_web_power_toggle_req = 1;
         } 
         else if (strstr(data, "OFF") != NULL) {
-            PC->DOUT &= ~BIT7; // 物理關閉電源
+            // 情境 2：網頁請求 OFF (可能為 PWPA8OFF 或單純 PWOFF)
+            g_web_power_toggle_req = 2;
         }
     }
 }
@@ -735,7 +757,6 @@ void RTC_Time_Date_Loop(void) {
             RV3028_GetTime(&current_time);
             int wd = Get_Weekday(current_time.year, current_time.month, current_time.date);
             
-            // 已全數替換為純 ASCII 空白 (0x20)，防止 VRAM 越界
             Safe_Print_OLED(0,  "      --- TIME & DATE ---");
             Safe_Print_OLED(16, "       %04d/%02d/%02d (%s)", current_time.year, current_time.month, current_time.date, week_str[wd]);
             Safe_Print_OLED(32, "         %02d:%02d:%02d", current_time.hours, current_time.minutes, current_time.seconds);
@@ -743,7 +764,6 @@ void RTC_Time_Date_Loop(void) {
         } else {
             char y_s[8], m_s[8], d_s[8], hr_s[8], min_s[8], sec_s[8];
             
-            // 已替換為純 ASCII 空白，根除 char array[8] 的 Buffer Overflow 問題
             if (mode==1 && !show_cursor) strcpy(y_s,"    "); else snprintf(y_s,8,"%04d",edit_time.year);
             if (mode==2 && !show_cursor) strcpy(m_s,"  ");   else snprintf(m_s,8,"%02d",edit_time.month);
             if (mode==3 && !show_cursor) strcpy(d_s,"  ");   else snprintf(d_s,8,"%02d",edit_time.date);
@@ -875,7 +895,7 @@ void Alarm_Menu_Loop(void) {
     }
     
     // =========================================================
-    // ?? 離開選單時，將 6 組鬧鐘狀態 (時間與開關) 傳給 ESP32 存入 SD 卡
+    // 離開選單時，將 6 組鬧鐘狀態傳給 ESP32 存入 SD 卡
     // =========================================================
     OLED_Clear();
     Safe_Print_OLED_Smooth(24, 0, 63, 0x0F, "   Saving to SD Card...");
@@ -883,14 +903,13 @@ void Alarm_Menu_Loop(void) {
 
     for(int i = 0; i < 6; i++) {
         char tx_buf[32];
-        // 格式: 索引,時,分,秒,開關 (範例: 0,12,30,00,1)
         snprintf(tx_buf, sizeof(tx_buf), "%d,%02d,%02d,%02d,%d", 
                  i, g_alarms[i].hours, g_alarms[i].minutes, g_alarms[i].seconds, g_alarms[i].enabled);
                  
-        JIG_8CP_Send_Packet("AS", tx_buf); // 送出 Alarm Save 指令
-        Delay_ms(80); // ?? 給予 ESP32 處理寫入 SD 卡的緩衝時間，防掉包
+        JIG_8CP_Send_Packet("AS", tx_buf); 
+        Delay_ms(80); 
     }
-    Delay_ms(200); // 讓畫面停留一下
+    Delay_ms(200); 
 }
 
 void Time_Set_Menu_Loop(void) {
@@ -901,7 +920,7 @@ void Time_Set_Menu_Loop(void) {
         Global_Background_Tasks();
         if (g_force_alarm_menu) { idx = 2; Alarm_Menu_Loop(); continue; } // 自動導航到鬧鐘
         UI_Clear();
-        Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "    --- TIME SET ---      R:Next");
+        Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "   --- TIME SET ---      R:Next");
         Safe_Print_OLED_Smooth(16, 16, 63, (idx==0)?0x0F:0x04, "%s 1. Time & Date", (idx==0)?">":" ");
         Safe_Print_OLED_Smooth(32, 16, 63, (idx==1)?0x0F:0x04, "%s 2. Stopwatch", (idx==1)?">":" ");
         Safe_Print_OLED_Smooth(48, 16, 63, (idx==2)?0x0F:0x04, "%s 3. Alarms" , (idx==2)?">":" "); 
@@ -928,7 +947,7 @@ void Power_Monitor_Loop(void) {
     Safe_Print_OLED(16, "Red Btn (Power)"); 
     Safe_Print_OLED(32, "Wait for Module..."); 
     UI_Update(); 
-    Delay_ms(1000); // 起始提示畫面
+    Delay_ms(1000); 
 
     int power_state = 0;
     uint32_t ui_tick = 1000;
@@ -940,7 +959,7 @@ void Power_Monitor_Loop(void) {
     while(1) {
         Global_Background_Tasks(); if (g_force_alarm_menu) break; 
 
-        // 1. 偵測 Red(PA8) 電源切換
+        // 1. 偵測 Red(PA8) 電源切換 或 網頁虛擬按鈕請求
         if (Check_Power_Toggle(&power_state)) {
             if (power_state) { PC->DOUT |= BIT7; JigBeep(100); } 
             else { PC->DOUT &= ~BIT7; JigBeep(500); }
@@ -969,7 +988,7 @@ void Power_Monitor_Loop(void) {
         if (Check_Exit_Button()) break;
 
         // ---------------------------------------------------
-        // [任務 A] 螢幕刷新 (每 250ms 執行一次，降低 SPI 佔用)
+        // [任務 A] 螢幕刷新 (每 250ms 執行一次)
         // ---------------------------------------------------
         if (ui_tick >= 250) { 
             float voltage = getBusVoltage_V(); 
@@ -979,32 +998,29 @@ void Power_Monitor_Loop(void) {
             UI_Clear();
             char buf1[33], buf2[33], buf3[33], buf4[33];
             
-            // 排版第一到第三行
             snprintf(buf1, 33, "AVG:%-7.1fmA Max:%.1fmA", g_fCurrentAvg, g_fMaxCurrent);
             snprintf(buf2, 33, "CUR:%-7.1fmA Min:%.0fmA", inst_current, (g_fMinCurrent==9999.0f)?0:g_fMinCurrent);
-            snprintf(buf3, 33, "%-6.2fV           [Power:%s]", voltage, power_state?"ON ":"OFF");
+            snprintf(buf3, 33, "%-6.2fV            [Power:%s]", voltage, power_state?"ON ":"OFF");
 
-            // 排版第四行 (依據連線狀態動態顯示)
             if (g_u8WifiConnected) {
-                snprintf(buf4, 33, "IP:%-14s B:Rst R:Pwr", g_szWifiIP); // 空間極限調配
+                snprintf(buf4, 33, "IP:%-14s B:Rst R:Pwr", g_szWifiIP); 
             } else if (strcmp(g_szWifiIP, "WAITING...") == 0) {
                 snprintf(buf4, 33, "WIFI: WAITING... B:Rst R:Pwr");
             } else {
                 snprintf(buf4, 33, "W:WIFI IP B:Rst R:Pwr Y:Exit");
             }
 
-            // 使用 VRAM 順滑寫入
             Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, buf1);
             Safe_Print_OLED_Smooth(16, 0, 63, 0x0F, buf2);
             Safe_Print_OLED_Smooth(32, 0, 63, 0x0F, buf3);
-            Safe_Print_OLED_Smooth(48, 0, 63, 0x04, buf4); // 最底下提示列稍微暗一點
+            Safe_Print_OLED_Smooth(48, 0, 63, 0x04, buf4); 
             UI_Update(); 
             
             ui_tick = 0; 
         }
 
         // ---------------------------------------------------
-        // [任務 B] 數據傳送 ESP32 (每 250ms 執行一次，與螢幕錯開)
+        // [任務 B] 數據傳送 ESP32 (每 250ms 執行一次)
         // ---------------------------------------------------
         if (g_u8WifiConnected && power_state) {
             tx_tick++;
@@ -1012,7 +1028,6 @@ void Power_Monitor_Loop(void) {
                 char data_str[32];
                 float inst_current = getCurrent_mA();
                 float voltage = getBusVoltage_V();
-                // 組裝 PD 指令並發送
                 snprintf(data_str, sizeof(data_str), "%.1f,%.2f", inst_current, voltage);
                 JIG_8CP_Send_Packet("PD", data_str);
                 tx_tick = 0;
@@ -1025,7 +1040,7 @@ void Power_Monitor_Loop(void) {
         ui_tick++;
     }
     
-    PC->DOUT &= ~BIT7; UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
+    PC->DOUT &= ~BIT7; g_power_state = 0; UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
 
 // =======================================================
@@ -1060,7 +1075,7 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
         if (loop_tick >= 1000) { Update_Dashboard_Display(power_state, rx_count, rx_buf); loop_tick = 0; }
         Delay_ms(1); loop_tick++;
     }
-    PC->DOUT &= ~BIT7; UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
+    PC->DOUT &= ~BIT7; g_power_state = 0; UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
 
 void Wiegand_Monitor_Test(void) {
@@ -1086,7 +1101,7 @@ void Wiegand_Monitor_Test(void) {
         }
         Delay_ms(1); loop_tick++;
     }
-    PC->DOUT &= ~BIT7; GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
+    PC->DOUT &= ~BIT7; g_power_state = 0; GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
 
 void Decode_TK2_Raw(char* out_str) {
@@ -1117,7 +1132,7 @@ void TK2_Monitor_Test(void) {
         if (loop_tick >= 1000) { Update_Dashboard_Display(power_state, rx_count, tk2_str); loop_tick = 0; }
         Delay_ms(1); loop_tick++;
     }
-    PC->DOUT &= ~BIT7; GPIO_DisableInt(PB, 5); UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
+    PC->DOUT &= ~BIT7; g_power_state = 0; GPIO_DisableInt(PB, 5); UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
 
 void UART1_JIG_8CP_Test(void) {
@@ -1155,8 +1170,7 @@ int main(void) {
 
     JigBeep(500); Delay_ms(100); JigBeep(500); Delay_ms(1000);
     
-	
-		JIG_8CP_Send_Packet("AL", "?");
+    JIG_8CP_Send_Packet("AL", "?");
     // 1. 在陣列最前面加入 "Power Monitor"
     const char *menu_items[] = { "Power Monitor", "RS232 Monitor", "Wiegand", "TK2", "Time Set", "Buzzer Settings", "USBHID SET", "UART1 JIG_8CP" };
     const int NUM_ITEMS = sizeof(menu_items) / sizeof(menu_items[0]); 
@@ -1169,9 +1183,9 @@ int main(void) {
     while(1) {
         Global_Background_Tasks(); 
         if (g_force_alarm_menu) { current_idx = 4; Time_Set_Menu_Loop(); continue; } // Time Set 的 index 變成了 4
-				
-				char menu_title[64];
-				snprintf(menu_title, sizeof(menu_title), "Select Function (%s)", FIRMWARE_VERSION);
+                
+        char menu_title[64];
+        snprintf(menu_title, sizeof(menu_title), "Select Function (%s)", FIRMWARE_VERSION);
         UI_Draw_Menu_State(menu_title, menu_items, NUM_ITEMS, current_idx);
         int selected = 0;
 

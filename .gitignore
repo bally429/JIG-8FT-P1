@@ -19,6 +19,7 @@ Voice chip firmware write tool/
 *.build_log.htm
 *.ncfg
 *.txt
+*.bak
 # 忽略使用者的個人設定檔 (每台電腦不同)
 *.uvoptx
 *.uvguix.*
