@@ -19,6 +19,7 @@
 #include <SPI.h>
 #include <SD.h>
 #include <WebSocketsServer.h> 
+#include <time.h>
 
 // --- 定義通訊協定字元 ---
 #define JIG_8CP_STX 0x02
@@ -551,6 +552,67 @@ void handleMonitor() {
   </body></html>
   )rawliteral";
   server.send(200, "text/html", html);
+}
+
+// 1. NTP 時間初始化 (UTC+8 台灣時區)
+void initNTP() {
+    // 參數：時區偏移秒數(8小時*3600), 日光節約時間(無=0), NTP伺服器
+    configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+    Serial.println("Waiting for NTP time sync...");
+    struct tm timeinfo;
+    while (!getLocalTime(&timeinfo)) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nNTP Sync Successful!");
+    
+    // 取得時間後，立刻下指令給 M031 更新 RTC
+    sendTimeToM031(&timeinfo);
+}
+
+// 2. 將時間下發給 M031
+void sendTimeToM031(struct tm *timeinfo) {
+    char dataBuf[32];
+    // 轉為 ST2026,07,08,15,30,00 格式
+    snprintf(dataBuf, sizeof(dataBuf), "%04d,%02d,%02d,%02d,%02d,%02d",
+             timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
+             timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+    sendToM031_JIG_8CP("ST", dataBuf);
+}
+
+// 3. 讀取 SD 卡並一次性回傳給 M031
+void sendConfigToM031() {
+    File file = SD.open("/PowerSet/config.txt");
+    if (!file) {
+        Serial.println("Failed to open config.txt");
+        return;
+    }
+    
+    // 假設讀取到的參數為 voltageLimit 和 currentLimit
+    String configData = file.readStringUntil('\n'); // 根據您的 TXT 格式解析
+    file.close();
+    
+    // 假設解析後得到 12.5 和 1000.0
+    // 直接將 Data 一次性給 M031
+    sendToM031_JIG_8CP("CF", "12.5,1000.0"); 
+}
+
+// 4. [🔴 開始錄製測試報告] 產生含 millis() 毫秒的 CSV 日期時間字串
+String getCSVStartTime() {
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) {
+        return "Time_Not_Synced";
+    }
+    
+    char timeStringBuff[64];
+    // 將 YYYY/MM/DD HH:MM:SS 與 millis() 結合成毫秒格式
+    // 由於 millis() 是持續累加的，我們用 millis() % 1000 來取得當下精準的毫秒尾數
+    snprintf(timeStringBuff, sizeof(timeStringBuff), "%04d/%02d/%02d %02d:%02d:%02d.%03lu",
+             timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+             timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
+             millis() % 1000);
+             
+    return String(timeStringBuff);
 }
 
 void handleApiData() {

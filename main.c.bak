@@ -18,6 +18,10 @@
  * 2. 重構 Check_Power_Toggle 引入虛擬實體按鈕機制 (g_web_power_toggle_req)。
  * 3. 實作 Scenario 3，實體按鍵觸發時主動推播 PWON/PWOFF 給 ESP32。
  * 4. 實作 Scenario 4，支援 ESP32 詢問 PW? 時回傳真實狀態。
+ * V5.3.10 (2026/07/08): [UI Bug 修復]
+ * 1. 修復 Alarm_Menu_Loop 中誤用硬體 OLED_Clear 導致 VRAM 溢滿與畫面黑屏問題。
+ * 2. 清除 Time & Date 格式化字串中隱藏的 NBSP (特殊空白)，防止 VRAM 緩衝區被推擠截斷導致時間無法顯示。
+ * 3. 擴大 Safe_Print_OLED 的字串處理緩衝區至 128 Bytes，提高穩定性。
  * ===========================================================================================
  */
 
@@ -33,7 +37,7 @@
 // =======================================================
 // [系統版本控制]
 // =======================================================
-#define FIRMWARE_VERSION "V5.3.9"
+#define FIRMWARE_VERSION "V5.3.10"
 
 // =======================================================
 // [系統全域設定與變數]
@@ -51,7 +55,7 @@ volatile uint8_t g_u8StopwatchRunning = 0;
 volatile uint8_t g_force_alarm_menu = 0; 
 
 // =======================================================
-// [WIFI 與通訊、電源狀態變數] (V5.3.9 升級)
+// [WIFI 與通訊、電源狀態變數]
 // =======================================================
 char g_szWifiIP[20] = "";
 uint8_t g_u8WifiConnected = 0;
@@ -121,6 +125,7 @@ void Delay_ms(uint32_t ms);
 void Delay_us(uint32_t us); 
 void JigForceBeep(uint32_t ms); 
 void JigBeep(uint32_t ms);      
+void JIG_8CP_Send_Packet(const char* cmd_code, const char* data);
 
 // [V5.3.6 架構升級 API]
 void UI_Clear(void);
@@ -170,7 +175,7 @@ void Reset_Current_Filter(void) {
 }
 
 // =======================================================
-// [核心按鍵與共用 UI 模組 - V5.3.9 四大情境同步引擎]
+// [核心按鍵與共用 UI 模組]
 // =======================================================
 int Check_Exit_Button(void) {
     if((PF->PIN & BIT5) == 0) { Delay_ms(50); if((PF->PIN & BIT5) == 0) { JigBeep(200); while((PF->PIN & BIT5)==0){} return 1; } } return 0;
@@ -197,21 +202,18 @@ int Check_Power_Toggle(int *power_state) {
     
     // 2. 偵測網頁發送的軟體控制請求 (虛擬按鈕)
     if (g_web_power_toggle_req == 1 && *power_state == 0) {
-        // 【情境 1】網頁要求 ON，且目前是 OFF
         *power_state = 1;
         g_power_state = 1;
-        g_web_power_toggle_req = 0; // 消費請求
-        return 1; // 假裝按下了實體按鈕，觸發後續 Setup 邏輯
+        g_web_power_toggle_req = 0;
+        return 1;
     }
     if (g_web_power_toggle_req == 2 && *power_state == 1) {
-        // 【情境 2】網頁要求 OFF，且目前是 ON
         *power_state = 0;
         g_power_state = 0;
-        g_web_power_toggle_req = 0; // 消費請求
-        return 1; // 假裝按下了實體按鈕，觸發後續 Setup 邏輯
+        g_web_power_toggle_req = 0;
+        return 1; 
     }
     
-    // 防呆：清除重複或無效的狀態要求
     g_web_power_toggle_req = 0; 
     return 0;
 }
@@ -287,7 +289,7 @@ typedef struct {
     int min_y;
     int max_y;
     uint8_t brightness;
-    char text[33];
+    char text[128];
     uint8_t active;
 } VRAM_Line;
 
@@ -346,7 +348,7 @@ void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, con
 }
 
 void Safe_Print_OLED(int y, const char *fmt, ...) {
-    char temp_buf[33];
+    char temp_buf[128]; // [V5.3.10 FIX] 擴大緩衝區，防禦特殊字元長度溢位
     va_list argptr;
     va_start(argptr, fmt);
     NVIC_DisableIRQ(USBD_IRQn);
@@ -360,7 +362,7 @@ void UI_Draw_Menu_State(const char* title, const char** items, int num_items, in
     int prev_idx = (curr_idx - 1 + num_items) % num_items;
     int next_idx = (curr_idx + 1) % num_items;
     UI_Clear();
-    Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, title);                  
+    Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, title);                 
     Safe_Print_OLED_Smooth(16, 16, 63, 0x04, "  %s", items[prev_idx]); 
     Safe_Print_OLED_Smooth(32, 16, 63, 0x0F, "> %s", items[curr_idx]); 
     Safe_Print_OLED_Smooth(48, 16, 63, 0x04, "  %s", items[next_idx]); 
@@ -570,18 +572,14 @@ void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
             }
         }
     }
-    // 【四大情境解耦接收區】 - V5.3.9 升級
     else if (strcmp(cmd_code, "PW") == 0) {
         if (strcmp(data, "?") == 0) {
-            // 情境 4：網頁剛開啟 (狀態查詢) - 據實回報
             JIG_8CP_Send_Packet("PW", g_power_state ? "ON" : "OFF");
         }
         else if (strstr(data, "ON") != NULL) {
-            // 情境 1：網頁請求 ON (可能為 PWPA8ON 或單純 PWON)
             g_web_power_toggle_req = 1;
         } 
         else if (strstr(data, "OFF") != NULL) {
-            // 情境 2：網頁請求 OFF (可能為 PWPA8OFF 或單純 PWOFF)
             g_web_power_toggle_req = 2;
         }
     }
@@ -756,6 +754,7 @@ void RTC_Time_Date_Loop(void) {
             RV3028_GetTime(&current_time);
             int wd = Get_Weekday(current_time.year, current_time.month, current_time.date);
             
+            // [V5.3.10 FIX] 清除多餘的全形字元 (NBSP)，使用純 ASCII 的空格 0x20，避免超過緩衝區長度。
             Safe_Print_OLED(0,  "      --- TIME & DATE ---");
             Safe_Print_OLED(16, "       %04d/%02d/%02d (%s)", current_time.year, current_time.month, current_time.date, week_str[wd]);
             Safe_Print_OLED(32, "         %02d:%02d:%02d", current_time.hours, current_time.minutes, current_time.seconds);
@@ -818,6 +817,7 @@ void Stopwatch_Loop(void) {
         uint32_t m = (g_u32StopwatchMs / 60000) % 60;
         uint32_t h = (g_u32StopwatchMs / 3600000) % 100;
         UI_Clear();
+        // [V5.3.10 FIX] 替換成標準空白
         Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "      --- STOPWATCH ---");
         Safe_Print_OLED_Smooth(24, 0, 63, 0x0F, "       %02d:%02d:%02d:%03d", h, m, s, ms);
         Safe_Print_OLED_Smooth(48, 0, 63, 0x08, " W:Start/Stop  W:Rst  Y:Back");
@@ -844,27 +844,31 @@ void Alarm_Menu_Loop(void) {
         Global_Background_Tasks(); 
         if (g_force_alarm_menu && !g_alarm_triggered) g_force_alarm_menu = 0; 
         blink_timer++; if (blink_timer > 10) { show_cursor = !show_cursor; blink_timer = 0; }
-        OLED_Clear();
+        
+        // [V5.3.10 FIX] 將 OLED_Clear() 換成 UI_Clear()，避免 VRAM 撐滿造成黑屏！
+        UI_Clear();
         
         int p_idx = (current_idx - 1 + 6) % 6; int n_idx = (current_idx + 1) % 6;
-        char buf[32];
-        snprintf(buf, 32, "  %d. [%02d:%02d:%02d] (%s)", p_idx+1, g_alarms[p_idx].hours, g_alarms[p_idx].minutes, g_alarms[p_idx].seconds, g_alarms[p_idx].enabled?"ON ":"OFF");
+        char buf[64];
+        snprintf(buf, sizeof(buf), "  %d. [%02d:%02d:%02d] (%s)", p_idx+1, g_alarms[p_idx].hours, g_alarms[p_idx].minutes, g_alarms[p_idx].seconds, g_alarms[p_idx].enabled?"ON ":"OFF");
         Safe_Print_OLED_Smooth(0, 0, 63, 0x04, buf);
 
         if (mode == 0) {
-            snprintf(buf, 32, "> %d. [%02d:%02d:%02d] (%s)", current_idx+1, g_alarms[current_idx].hours, g_alarms[current_idx].minutes, g_alarms[current_idx].seconds, g_alarms[current_idx].enabled?"ON ":"OFF");
+            snprintf(buf, sizeof(buf), "> %d. [%02d:%02d:%02d] (%s)", current_idx+1, g_alarms[current_idx].hours, g_alarms[current_idx].minutes, g_alarms[current_idx].seconds, g_alarms[current_idx].enabled?"ON ":"OFF");
         } else {
-            char h_s[4], m_s[4], s_s[4];
-            if(mode==1 && !show_cursor) strcpy(h_s,"  "); else snprintf(h_s,4,"%02d",g_alarms[current_idx].hours);
-            if(mode==2 && !show_cursor) strcpy(m_s,"  "); else snprintf(m_s,4,"%02d",g_alarms[current_idx].minutes);
-            if(mode==3 && !show_cursor) strcpy(s_s,"  "); else snprintf(s_s,4,"%02d",g_alarms[current_idx].seconds);
-            snprintf(buf, 32, "> %d. [%s:%s:%s] (%s)", current_idx+1, h_s, m_s, s_s, g_alarms[current_idx].enabled?"ON ":"OFF");
+            char h_s[8], m_s[8], s_s[8];
+            if(mode==1 && !show_cursor) strcpy(h_s,"  "); else snprintf(h_s,8,"%02d",g_alarms[current_idx].hours);
+            if(mode==2 && !show_cursor) strcpy(m_s,"  "); else snprintf(m_s,8,"%02d",g_alarms[current_idx].minutes);
+            if(mode==3 && !show_cursor) strcpy(s_s,"  "); else snprintf(s_s,8,"%02d",g_alarms[current_idx].seconds);
+            snprintf(buf, sizeof(buf), "> %d. [%s:%s:%s] (%s)", current_idx+1, h_s, m_s, s_s, g_alarms[current_idx].enabled?"ON ":"OFF");
         }
         Safe_Print_OLED_Smooth(16, 0, 63, 0x0F, buf);
-        snprintf(buf, 32, "  %d. [%02d:%02d:%02d] (%s)", n_idx+1, g_alarms[n_idx].hours, g_alarms[n_idx].minutes, g_alarms[n_idx].seconds, g_alarms[n_idx].enabled?"ON ":"OFF");
+        snprintf(buf, sizeof(buf), "  %d. [%02d:%02d:%02d] (%s)", n_idx+1, g_alarms[n_idx].hours, g_alarms[n_idx].minutes, g_alarms[n_idx].seconds, g_alarms[n_idx].enabled?"ON ":"OFF");
         Safe_Print_OLED_Smooth(32, 0, 63, 0x04, buf);
         Safe_Print_OLED_Smooth(48, 0, 63, 0x08, " Blk:ON/OFF W:Set Y:Back");
-        OLED_Update();
+        
+        // [V5.3.10 FIX] 將 OLED_Update() 換成 UI_Update()，將 VRAM 推送上硬體！
+        UI_Update();
 
         uint8_t red=(PF->PIN&BIT14)?1:0, blue=(PF->PIN&BIT3)?1:0, green=(PF->PIN&BIT4)?1:0, yellow=(PF->PIN&BIT5)?1:0, black=(PF->PIN&BIT6)?1:0;
         if (mode == 0) {
@@ -896,9 +900,9 @@ void Alarm_Menu_Loop(void) {
     // =========================================================
     // 離開選單時，將 6 組鬧鐘狀態傳給 ESP32 存入 SD 卡
     // =========================================================
-    OLED_Clear();
+    UI_Clear();  // [V5.3.10 FIX]
     Safe_Print_OLED_Smooth(24, 0, 63, 0x0F, "   Saving to SD Card...");
-    OLED_Update();
+    UI_Update(); // [V5.3.10 FIX]
 
     for(int i = 0; i < 6; i++) {
         char tx_buf[32];
@@ -919,7 +923,8 @@ void Time_Set_Menu_Loop(void) {
         Global_Background_Tasks();
         if (g_force_alarm_menu) { idx = 2; Alarm_Menu_Loop(); continue; } // 自動導航到鬧鐘
         UI_Clear();
-        Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "   --- TIME SET ---      R:Next");
+        // [V5.3.10 FIX] 替換成標準空白
+        Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "    --- TIME SET ---      R:Next");
         Safe_Print_OLED_Smooth(16, 16, 63, (idx==0)?0x0F:0x04, "%s 1. Time & Date", (idx==0)?">":" ");
         Safe_Print_OLED_Smooth(32, 16, 63, (idx==1)?0x0F:0x04, "%s 2. Stopwatch", (idx==1)?">":" ");
         Safe_Print_OLED_Smooth(48, 16, 63, (idx==2)?0x0F:0x04, "%s 3. Alarms" , (idx==2)?">":" "); 
@@ -987,9 +992,9 @@ void Power_Monitor_Loop(void) {
         if (Check_Exit_Button()) break;
 
         // ---------------------------------------------------
-        // [任務 A] 螢幕刷新 (每 250ms 執行一次)
+        // [任務 A] 螢幕刷新 (每 100ms 執行一次)
         // ---------------------------------------------------
-        if (ui_tick >= 250) { 
+        if (ui_tick >= 100) {
             float voltage = getBusVoltage_V(); 
             float inst_current = getCurrent_mA();
             if (inst_current == 0.0f) { set237Calibration_1A(); inst_current = getCurrent_mA(); }
@@ -999,7 +1004,7 @@ void Power_Monitor_Loop(void) {
             
             snprintf(buf1, 33, "AVG:%-7.1fmA Max:%.1fmA", g_fCurrentAvg, g_fMaxCurrent);
             snprintf(buf2, 33, "CUR:%-7.1fmA Min:%.0fmA", inst_current, (g_fMinCurrent==9999.0f)?0:g_fMinCurrent);
-            snprintf(buf3, 33, "%-6.2fV            [Power:%s]", voltage, power_state?"ON ":"OFF");
+            snprintf(buf3, 33, "%-6.2fV             [Power:%s]", voltage, power_state?"ON ":"OFF");
 
             if (g_u8WifiConnected) {
                 snprintf(buf4, 33, "IP:%-14s B:Rst R:Pwr", g_szWifiIP); 
@@ -1019,11 +1024,11 @@ void Power_Monitor_Loop(void) {
         }
 
         // ---------------------------------------------------
-        // [任務 B] 數據傳送 ESP32 (每 250ms 執行一次)
+        // [任務 B] 數據傳送 ESP32 (每 100ms 執行一次)
         // ---------------------------------------------------
         if (g_u8WifiConnected && power_state) {
             tx_tick++;
-            if (tx_tick >= 250) {
+            if (tx_tick >= 100) { 
                 char data_str[32];
                 float inst_current = getCurrent_mA();
                 float voltage = getBusVoltage_V();
@@ -1201,7 +1206,6 @@ int main(void) {
 
         if (selected == 1) {
             if (current_idx == 0) {
-                // [新增] 執行電壓電流偵測
                 Power_Monitor_Loop(); 
             }
             else if (current_idx == 1) {
