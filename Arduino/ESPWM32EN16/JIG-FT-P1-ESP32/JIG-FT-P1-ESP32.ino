@@ -1,18 +1,27 @@
-/* * 模組角色：ESP32 (ESPWM32EN16) 掃描器橋接程式與 Wi-Fi/Web 整合
- * 通訊協定：JIG_8CP (ASCII Protocol) [STX][Cmd][Data][Checksum][CR]
+/*
  * ===========================================================================================
  * Project: JIG-8FT-P1 _WIFIBLE (ESP32 控制端)
  * MCU: ESP32-WROOM-32E (ESPWM32EN16)
- * * [版本更新紀錄]
+ * [版本更新紀錄]
  * -------------------------------------------------------------------------------------------
- * V1.6.1  2026/07/08 [Bug 修復版] 修正 WebSocket UI 狀態卡死問題與安全熔斷盲區。
- * V1.6.2  2026/07/08 [穩定性升級] 
- * 1. 導入「硬體啟動寬限期 (Grace Period)」：通電前 2 秒暫停極限審查，根除開機瞬間電容充電造成的 0V 誤判熔斷。
- * 2. 修正 CSV 中文亂碼：在檔案開頭寫入 UTF-8 BOM，讓 Microsoft Excel 正確解析。
- * 3. 確保實體按鍵 (M031) 開機時，ESP32 也會同步給予寬限期保護。
- * -------------------------------------------------------------------------------------------
- */
+ * V1.5    2026/07/08 [核心安全升級] Web圖表擴增時間軸、網格與刻度；導入隨機斷訊與超限熔斷機制。
+ * V1.6    2026/07/08 移除輪詢改用 WebSocket，新增容量與能量計量，修正 CSV 首列亂碼。
+ * V1.7    2026/07/09 [防護與人機優化] 
+ * 1. 修正電壓保護邏輯：僅在電源 ON 時觸發防禦，徹底根除關電時「零點飄移」造成的連環警報。
+ * 2. 實作參數即時同步：點擊網頁保存時，同步發送 [CF] 封包下發給 M031 更新保護硬體。
+ * 3. 首頁增設動態恭敬尊稱：自動識別全域 User 變數並顯示專屬官方歡迎語。
+ * V1.8    2026/07/14 [安全警示與狀態同步優化] 
+ * 1. 修正安全警示視窗無法正確顯示問題：引入 safetyTripOccurred 標記，確保警示訊息在保護觸發後能被廣播一次，
+ *    並在電源狀態穩定為 OFF 後自動清除，避免重複彈窗。
+ * 2. 啟用 broadcastWebSocket Debug 輸出，便於監控警示訊息的發送。
+ * V1.9    2026/07/14 [圖表與通訊同步優化] 
+ * 1. 將 ESP32 WebSocket 廣播頻率從 50ms 調整為 20ms，與 M032 的 PD 指令發送頻率同步。
+ * 2. 將時間軸繪製整合至主圖 lineChart，移除獨立的 timeAxisChart canvas，確保刻度與數據點精確對齊。
+ * 3. 圖表時間軸單位從 50ms/格調整為 20ms/格，與廣播頻率一致。
+ * ===========================================================================================
+ * */
 
+#define FIRMWARE_VERSION "V1.9"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
@@ -73,8 +82,25 @@ File csvFile;
 
 unsigned long lastPdTime = 0;          
 unsigned long overCurrentStartTime = 0; 
-unsigned long powerOnTime = 0; // [新增] 電源開啟時間，用於硬體啟動寬限期
+unsigned long powerOnTime = 0; 
+unsigned long lastWsBroadcastTime = 0; 
 String systemWarning = "";             
+
+// --- [新增] 全域變數：鬧鐘陣列 ---
+struct AlarmConfig { int h; int m; int s; int en; };
+AlarmConfig alarms[6] = { {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0} };
+
+// =======================================================
+// [WIFI 與通訊狀態變數]
+// =======================================================
+char g_szWifiIP[20] = "";
+uint8_t g_u8WifiConnected = 0;
+
+// 【重大修復】將電源狀態升級為「系統全域變數」，讓網頁指令與實體紅按鈕共用同一個大腦
+volatile int g_iPowerState = 0;
+
+// --- [V1.8 新增] 全域變數：安全保護觸發標記 ---
+bool safetyTripOccurred = false; // 標記是否發生了安全保護觸發
 
 // --- 函式宣告 ---
 void setupSDCard();
@@ -83,16 +109,24 @@ void loadWiFiConfig();
 void saveWiFiConfig();
 void loadPowerConfig();
 void savePowerConfig();
+void loadAlarmsConfig(); // [新增]
+void saveAlarmsConfig(); // [新增]
 void setLedState(LedState state);
 void updateLED();
 void setupWiFi();
 void startAPMode();
+void initNTP();
+void sendTimeToM031(struct tm *timeinfo);
+void sendConfigToM031();
+String getCSVStartTime();
 void checkSafetyLimits();
 void broadcastWebSocket();
 void handleRoot();
 void handleWiFiSet();
 void handleSaveWiFi();
 void handleMonitor();
+void handleAlarmsSet();  // [新增] Web 鬧鐘介面
+void handleApiSaveAlarms(); // [新增] Web 儲存鬧鐘
 void handleApiData();
 void handleApiPower();
 void handleApiSaveConfig();
@@ -115,6 +149,7 @@ void setup() {
   setupSDCard();
   loadWiFiConfig();
   loadPowerConfig(); 
+  loadAlarmsConfig(); // [新增] 讀取 SD 卡鬧鐘設定
 
   setupWiFi();
 
@@ -122,6 +157,8 @@ void setup() {
   server.on("/wifi", handleWiFiSet);
   server.on("/save", HTTP_POST, handleSaveWiFi);
   server.on("/monitor", handleMonitor);
+  server.on("/alarms", handleAlarmsSet); // [新增] 路由
+  server.on("/api/saveAlarms", HTTP_POST, handleApiSaveAlarms); // [新增] 路由
   server.on("/api/data", handleApiData);     
   server.on("/api/power", HTTP_POST, handleApiPower);   
   server.on("/api/saveConfig", HTTP_POST, handleApiSaveConfig); 
@@ -147,111 +184,17 @@ void loop() {
     barcodeData.trim();
     if (barcodeData.length() > 0) sendToM031_JIG_8CP("SC", barcodeData);
   }
-}
 
-// ==========================================
-// [UI 主動推播系統 (解決網頁卡死核心)]
-// ==========================================
-void broadcastWebSocket() {
-  String wsJson = "{\"mA\":" + String(current_mA, 1) + 
-                  ",\"v\":" + String(current_V, 2) + 
-                  ",\"power\":\"" + power_state + "\"" + 
-                  ",\"warning\":\"" + systemWarning + "\"" + 
-                  ",\"mAh\":" + String(cumulative_mAh, 4) + 
-                  ",\"mWh\":" + String(cumulative_mWh, 4) + 
-                  ",\"logging\":" + (isRecordingCSV ? "true" : "false") + "}";
-  webSocket.broadcastTXT(wsJson);
-}
-
-// ==========================================
-// [WebSocket 事件攔截器]
-// ==========================================
-void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
-  if (type == WStype_CONNECTED) {
-    // 當網頁一打開，立刻向 M031 詢問狀態並刷新 UI
-    sendToM031_JIG_8CP("PW", "?");
+  // --- [V1.9] 調整廣播頻率 ---
+  if (millis() - lastWsBroadcastTime >= 20) { // 20ms
     broadcastWebSocket();
+    lastWsBroadcastTime = millis();
   }
-  else if (type == WStype_TEXT) {
-    String msg = String((char*)payload);
-    if (msg.startsWith("REC_START:")) {
-      logFilename = msg.substring(10);
-      if (!logFilename.endsWith(".csv")) logFilename += ".csv";
-      String fullPath = "/logs/" + logFilename;
-      csvFile = SD.open(fullPath.c_str(), FILE_WRITE);
-      if (csvFile) {
-        // [關鍵修復] 寫入 UTF-8 BOM，防止 Microsoft Excel 開啟時變成中文亂碼
-        const uint8_t bom[] = {0xEF, 0xBB, 0xBF};
-        csvFile.write(bom, sizeof(bom));
-        csvFile.println("時間(ms),電壓(V),電流(mA),容量(mAh),能量(mWh)");
-        isRecordingCSV = true;
-        broadcastWebSocket(); // 更新按鈕狀態
-      }
-    } 
-    else if (msg == "REC_STOP") {
-      if (isRecordingCSV) {
-        csvFile.close();
-        isRecordingCSV = false;
-        broadcastWebSocket(); // 更新按鈕狀態
-      }
-    }
-  }
+  // --- END [V1.9] 調整廣播頻率 ---
 }
 
 // ==========================================
-// [安全防禦與邏輯熔斷機制]
-// ==========================================
-void checkSafetyLimits() {
-  unsigned long currentMillis = millis();
-  bool stateChanged = false;
-
-  // 1. Watchdog: 超過 1.5s 沒收到 PD，判定硬體斷電
-  if (currentMillis - lastPdTime > 1500) {
-    if (power_state == "ON") {
-      power_state = "OFF";
-      overCurrentStartTime = 0;
-      if (isRecordingCSV) { csvFile.close(); isRecordingCSV = false; }
-      stateChanged = true;
-    }
-  }
-
-  // 2. 實時極限熔斷監控 
-  if (power_state == "ON" && systemWarning == "") {
-    
-    // [關鍵修復] 硬體啟動寬限期 (2秒)：避免電容充電瞬間的突波被誤判為異常
-    if (currentMillis - powerOnTime > 2000) {
-        
-        if (current_V < conf_minVoltage || current_V > conf_maxVoltage) {
-          sendToM031_JIG_8CP("PW", "PA8OFF"); // 送出指令關閉 M031 治具
-          power_state = "OFF";
-          systemWarning = "【電壓超標熔斷】實時電壓 " + String(current_V, 2) + "V 觸及安全邊界 (" + String(conf_minVoltage, 1) + "V ~ " + String(conf_maxVoltage, 1) + "V)！";
-          if (isRecordingCSV) { csvFile.println("ERROR,電壓超標安全熔斷"); csvFile.close(); isRecordingCSV = false; }
-          stateChanged = true;
-        }
-        else if (current_mA > conf_limitScale) {
-          if (overCurrentStartTime == 0) overCurrentStartTime = currentMillis; 
-          else if (currentMillis - overCurrentStartTime >= conf_limitDuration * 1000UL) {
-            sendToM031_JIG_8CP("PW", "PA8OFF"); // 送出指令關閉 M031 治具
-            power_state = "OFF";
-            systemWarning = "【電流超載延時熔斷】電流連續 " + String(conf_limitDuration) + " 秒超標 (" + String(current_mA, 1) + "mA > " + String(conf_limitScale, 1) + "mA)！";
-            if (isRecordingCSV) { csvFile.println("ERROR,電流超載安全熔斷"); csvFile.close(); isRecordingCSV = false; }
-            overCurrentStartTime = 0;
-            stateChanged = true;
-          }
-        } else {
-          overCurrentStartTime = 0; 
-        }
-    }
-  }
-
-  // 若狀態有改變 (包含被熔斷)，主動推播給網頁，網頁才不會卡死
-  if (stateChanged) {
-    broadcastWebSocket();
-  }
-}
-
-// ==========================================
-// [SD 卡與工具函式]
+// [SD 卡檔案系統與初始化]
 // ==========================================
 void setupSDCard() {
   spiSD.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
@@ -261,6 +204,7 @@ void setupSDCard() {
   if (!SD.exists("/logs")) SD.mkdir("/logs"); 
 }
 
+// ... (WiFi & PowerConfig load/save functions remain exactly the same) ...
 String extractQuote(String line) {
   int firstQuote = line.indexOf('"');
   int lastQuote = line.lastIndexOf('"');
@@ -311,47 +255,97 @@ void savePowerConfig() {
 }
 
 // ==========================================
-// [LED 燈號控制系統]
+// [新增] 鬧鐘 SD 卡讀取與儲存引擎
 // ==========================================
-void setLedState(LedState state) { 
-  currentLedState = state; 
-  failBlinkCount = 0; 
-  ledStateHigh = false; 
-  digitalWrite(WIFI_LED_PIN, LOW); 
-  previousLedMillis = millis(); 
-}
-
-void updateLED() { 
-  unsigned long cm = millis(); 
-  if (currentLedState == LED_ON) { digitalWrite(WIFI_LED_PIN, HIGH); } 
-  else if (currentLedState == LED_OFF) { digitalWrite(WIFI_LED_PIN, LOW); } 
-  else if (currentLedState == LED_BLINK_CONNECTING) { if (cm - previousLedMillis >= 500) { previousLedMillis = cm; ledStateHigh = !ledStateHigh; digitalWrite(WIFI_LED_PIN, ledStateHigh ? HIGH : LOW); } } 
-  else if (currentLedState == LED_BLINK_FAIL) { if (failBlinkCount < 8) { if (cm - previousLedMillis >= 100) { previousLedMillis = cm; ledStateHigh = !ledStateHigh; digitalWrite(WIFI_LED_PIN, ledStateHigh ? HIGH : LOW); failBlinkCount++; } } else { digitalWrite(WIFI_LED_PIN, LOW); currentLedState = LED_OFF; } }
-}
-
-void setupWiFi() {
-  setLedState(LED_BLINK_CONNECTING); WiFi.mode(WIFI_STA); WiFi.disconnect(); delay(100);
-  int n = WiFi.scanNetworks(); MatchedWiFi matches[5]; int matchCount = 0; bool anyConnected = false;
-  if (n > 0) {
-    for (int i = 0; i < n; ++i) {
-      String scannedSSID = WiFi.SSID(i); int32_t scannedRSSI = WiFi.RSSI(i);
-      for (int j = 0; j < 5; j++) { if (wifiList[j].ssid != "" && wifiList[j].ssid == scannedSSID) { bool alreadyAdded = false; for(int k=0; k<matchCount; k++) { if(matches[k].ssid == scannedSSID) { alreadyAdded = true; if(scannedRSSI > matches[k].rssi) matches[k].rssi = scannedRSSI; break; } } if(!alreadyAdded && matchCount < 5) { matches[matchCount].ssid = wifiList[j].ssid; matches[matchCount].pass = wifiList[j].pass; matches[matchCount].rssi = scannedRSSI; matchCount++; } } }
+void loadAlarmsConfig() {
+  if (SD.exists("/PowerSet/alarms.txt")) {
+    File file = SD.open("/PowerSet/alarms.txt", FILE_READ);
+    while (file.available()) {
+      String line = file.readStringUntil('\n'); line.trim();
+      if (line.length() == 0) continue;
+      int idx, h, m, s, en;
+      if (sscanf(line.c_str(), "%d,%d,%d,%d,%d", &idx, &h, &m, &s, &en) == 5) {
+        if (idx >= 0 && idx < 6) {
+          alarms[idx].h = h; alarms[idx].m = m; alarms[idx].s = s; alarms[idx].en = en;
+        }
+      }
     }
+    file.close();
+  } else { 
+    saveAlarmsConfig(); // 初始化建立預設檔案
   }
-  for (int i = 0; i < matchCount - 1; i++) { for (int j = i + 1; j < matchCount; j++) { if (matches[j].rssi > matches[i].rssi) { MatchedWiFi temp = matches[i]; matches[i] = matches[j]; matches[j] = temp; } } }
-  for (int i = 0; i < matchCount; i++) { WiFi.begin(matches[i].ssid.c_str(), matches[i].pass.c_str()); int attempts = 0; while (WiFi.status() != WL_CONNECTED && attempts < 20) { delay(500); updateLED(); attempts++; } if (WiFi.status() == WL_CONNECTED) { anyConnected = true; break; } }
-  if (!anyConnected) { for (int i = 0; i < 5; i++) { if (wifiList[i].ssid == "") continue; WiFi.begin(wifiList[i].ssid.c_str(), wifiList[i].pass.c_str()); int attempts = 0; while (WiFi.status() != WL_CONNECTED && attempts < 20) { delay(500); updateLED(); attempts++; } if (WiFi.status() == WL_CONNECTED) { anyConnected = true; break; } } }
-  if (anyConnected) { setLedState(LED_ON); isAPMode = false; } else { setLedState(LED_BLINK_FAIL); startAPMode(); }
 }
-void startAPMode() { isAPMode = true; WiFi.mode(WIFI_AP); WiFi.softAP("JIG_8FT_P1_WIFIset"); dnsServer.start(DNS_PORT, "*", WiFi.softAPIP()); }
+
+void saveAlarmsConfig() {
+  File file = SD.open("/PowerSet/alarms.txt", FILE_WRITE);
+  if (file) {
+    for (int i = 0; i < 6; i++) {
+      file.printf("%d,%02d,%02d,%02d,%d\n", i, alarms[i].h, alarms[i].m, alarms[i].s, alarms[i].en);
+    }
+    file.close();
+  }
+}
 
 // ==========================================
-// [Web Server 頁面路由與下載模組]
+// [Web Server UI 與 API]
 // ==========================================
 void handleRoot() {
-  String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>JIG-8FT-P1 總控制台</title><style>body{font-family: Arial, sans-serif; text-align: center; padding: 40px; background-color: #f4f4f9;} .btn {display: block; width: 80%; max-width: 300px; margin: 20px auto; padding: 20px; font-size: 20px; font-weight: bold; color: white; background-color: #0056b3; border: none; border-radius: 10px; cursor: pointer; text-decoration: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1);} .btn:hover {background-color: #004494;} .btn.alt {background-color: #28a745;} .btn.alt:hover {background-color: #218838;}</style></head><body><h2>⚙️ JIG-8FT-P1 控制面板</h2><a href='/wifi' class='btn'>🌐 網路備援設定</a><a href='/monitor' class='btn alt'>⚡ 電壓電流偵測</a></body></html>)rawliteral";
+  // 動態判定全域使用者尊稱
+  String welcomeMsg = "歡迎您使用步進馬達讀卡治具控制台！";
+  if (globalUser != "" && globalUser.length() > 0) {
+    welcomeMsg = "歡迎 「" + globalUser + "」 使用步進馬達讀卡治具控制台！";
+  }
+
+  String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>JIG-8FT-P1 總控制台</title><style>body{font-family: Arial, sans-serif; text-align: center; padding: 40px; background-color: #f4f4f9;} .btn {display: block; width: 80%; max-width: 300px; margin: 20px auto; padding: 20px; font-size: 20px; font-weight: bold; color: white; background-color: #0056b3; border: none; border-radius: 10px; cursor: pointer; text-decoration: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px;} .btn:hover {background-color: #004494;} .btn.alt {background-color: #28a745;} .btn.alt:hover {background-color: #218838;} .btn.alt2 {background-color: #f39c12;} .btn.alt2:hover {background-color: #e67e22;} .welcome-msg {font-size: 18px; color: #2c3e50; margin: 15px 0; font-weight: bold;}</style></head><body><h2>⚙️ JIG-8FT-P1 控制面板</h2><div class='welcome-msg'>)rawliteral" 
+  + welcomeMsg + 
+  R"rawliteral(</div><a href='/wifi' class='btn'>🌐 網路備援設定</a><a href='/monitor' class='btn alt'>⚡ 電壓電流偵測</a><a href='/alarms' class='btn alt2'>⏰ 多工鬧鐘設定</a></body></html>)rawliteral";
+  
   server.send(200, "text/html", html);
 }
+
+// [新增] Web UI：鬧鐘設定面板
+void handleAlarmsSet() {
+  String html = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>系統鬧鐘設定</title>";
+  html += "<style>body{font-family:Arial; padding:20px; background:#f4f4f4;} .card{background:#fff; padding:15px; margin-bottom:15px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1); display:flex; justify-content:space-between; align-items:center;} .back-btn{display:inline-block; margin-bottom:15px; text-decoration:none; color:#0056b3; font-weight:bold;}</style>";
+  html += "<script>function saveAll() { let fd = new FormData(document.getElementById('aForm')); fetch('/api/saveAlarms', {method:'POST', body:new URLSearchParams(fd)}).then(()=>alert('✅ 鬧鐘已更新並成功同步至 M031 主板！')); }</script>";
+  html += "</head><body><a href='/' class='back-btn'>⬅ 返回首頁</a><h2>⏰ 系統鬧鐘設定</h2><form id='aForm' onsubmit='event.preventDefault(); saveAll();'>";
+
+  for (int i=0; i<6; i++) {
+     char tbuf[16];
+     snprintf(tbuf, sizeof(tbuf), "%02d:%02d:%02d", alarms[i].h, alarms[i].m, alarms[i].s);
+     String checked = alarms[i].en ? "checked" : "";
+     html += "<div class='card'><div><h3 style='margin-top:0;'>鬧鐘 " + String(i+1) + "</h3>";
+     html += "<input type='time' step='1' name='t" + String(i) + "' value='" + String(tbuf) + "' style='font-size:18px; padding:5px;'></div>";
+     html += "<div><label style='font-size:18px; font-weight:bold;'><input type='checkbox' name='en" + String(i) + "' value='1' " + checked + " style='width:22px; height:22px; vertical-align:middle;'> 啟用開關</label></div></div>";
+  }
+  html += "<button type='submit' style='width:100%; padding:15px; font-size:18px; background:#4CAF50; color:white; border:none; border-radius:8px; cursor:pointer;'>💾 儲存並同步至設備</button></form></body></html>";
+  server.send(200, "text/html", html);
+}
+
+// [新增] Web API：接收網頁的鬧鐘修改，並主動下發給 M031
+void handleApiSaveAlarms() {
+  for (int i=0; i<6; i++) {
+     String t_val = server.arg("t" + String(i)); // Web form 送出的時間字串 "HH:MM:SS" 或 "HH:MM"
+     int en = server.hasArg("en" + String(i)) ? 1 : 0;
+     
+     if (t_val.length() >= 5) {
+        int h = t_val.substring(0, 2).toInt();
+        int m = t_val.substring(3, 5).toInt();
+        int s = (t_val.length() >= 8) ? t_val.substring(6, 8).toInt() : 0; // 若沒輸入秒數，預設 0
+        alarms[i].h = h; alarms[i].m = m; alarms[i].s = s; alarms[i].en = en;
+
+        // 【同步至 M031】
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d,%02d,%02d,%02d,%d", i, h, m, s, en);
+        sendToM031_JIG_8CP("AL", buf);
+        delay(80); // 給 M031 UART 處理時間，避免封包黏在一起被丟棄
+     }
+  }
+  saveAlarmsConfig(); // 將最新狀態寫入 SD 卡
+  server.send(200, "text/plain", "OK");
+}
+
+// ... (UI HTML of Monitor & WiFi settings remain same as V1.7.0, omitted for brevity) ...
 void handleWiFiSet() {
   String html = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>網路備援設定</title><style>body{font-family:Arial; padding:20px; background:#f4f4f4;} .card{background:#fff; padding:15px; margin-bottom:15px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);} .back-btn{display:inline-block; margin-bottom:15px; text-decoration:none; color:#0056b3; font-weight:bold;}</style></head><body><a href='/' class='back-btn'>⬅ 返回首頁</a><h2>網路備援設定</h2><form action='/save' method='POST'>";
   html += "<div class='card'><h3>全域使用者 (User)</h3><input type='text' name='globalUser' value='" + globalUser + "' style='width:100%; padding:8px;'></div>";
@@ -368,7 +362,7 @@ void handleSaveWiFi() {
 void handleMonitor() {
   String html = R"rawliteral(
   <!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>
-  <title>電壓電流即時分析儀 V1.6.2</title>
+  <title>電壓電流即時分析儀 V1.7.0</title>
   <style>
     body{font-family: Arial, sans-serif; background: #1e1e1e; color: #fff; margin: 0; padding: 10px; text-align: center;}
     .back-btn{display: block; text-align: left; color: #00c3ff; text-decoration: none; margin-bottom: 10px; font-weight: bold;}
@@ -419,6 +413,9 @@ void handleMonitor() {
     
     <div class="panel" style="max-width: 550px;">
       <canvas id="lineChart"></canvas>
+      <!-- --- [V1.9] 移除獨立的時間軸 Canvas --- -->
+      <!-- <canvas id="timeAxisChart" style="width:100%; height:20px; margin-top: 5px;"></canvas> -->
+      <!-- --- END [V1.9] 移除 --- -->
     </div>
   </div>
 
@@ -432,12 +429,17 @@ void handleMonitor() {
   <script>
     const cvs = document.getElementById('lineChart');
     const ctx = cvs.getContext('2d');
-    const maxPoints = 200; 
+    // --- [V1.9] 移除獨立的時間軸 Canvas 和 Context ---
+    // const timeAxisCvs = document.getElementById('timeAxisChart');
+    // const timeAxisCtx = timeAxisCvs.getContext('2d');
+    // --- END [V1.9] 移除 ---
+    const maxPoints = 200;   
     let historyData = new Array(maxPoints).fill(0); 
     let ws;
     let localRecording = false;
     let localFilename = "";
-    let JS_PowerState = "OFF"; // JS 內部獨立維護狀態
+    let JS_PowerState = "OFF";
+    let lastDisplayedWarning = ""; // 🌟 [新增] 用來記住最後一次彈出的警告
 
     function initWebSocket() {
       ws = new WebSocket('ws://' + window.location.hostname + ':81/');
@@ -454,7 +456,7 @@ void handleMonitor() {
     initWebSocket();
 
     function updateUI(data) {
-      JS_PowerState = data.power; // 確保前端變數 100% 同步
+      JS_PowerState = data.power; 
 
       document.getElementById('curText').innerText = data.mA.toFixed(1) + ' mA';
       document.getElementById('volText').innerText = data.v.toFixed(2) + ' V';
@@ -479,10 +481,16 @@ void handleMonitor() {
         localRecording = false;
       }
 
-      if(data.warning !== "") {
-         document.getElementById("warnMsg").innerText = data.warning;
-         document.getElementById("warnModal").style.display = "block";
-         document.getElementById("modalOverlay").style.display = "block";
+// 🌟 [替換此區塊] 加入防止連續彈窗邏輯
+      if (data.warning !== "") {
+        if (data.warning !== lastDisplayedWarning) {
+           document.getElementById("warnMsg").innerText = data.warning;
+           document.getElementById("warnModal").style.display = "block";
+           document.getElementById("modalOverlay").style.display = "block";
+           lastDisplayedWarning = data.warning; // 記住這次的警告，不重複彈出
+        }
+      } else {
+        lastDisplayedWarning = ""; // 若 ESP32 端已清空警告 (例如重新開啟電源)，則重置紀錄
       }
 
       historyData.push(data.power === "ON" ? data.mA : 0);
@@ -502,10 +510,14 @@ void handleMonitor() {
       }
     }
 
+    // --- [V1.9] 修正 drawChart 函數 ---
     function drawChart() {
-      cvs.width = cvs.clientWidth; cvs.height = cvs.clientHeight;
-      const w = cvs.width, h = cvs.height;
+      cvs.width = cvs.clientWidth; 
+      cvs.height = cvs.clientHeight;
+      const w = cvs.width, h = cvs.clientHeight;
       ctx.clearRect(0, 0, w, h);
+
+      // --- 繪製主圖 ---
       const maxScale = parseFloat(document.getElementById('maxScale').value) || 500;
       const limitVal = parseFloat(document.getElementById('limitScale').value) || 400;
 
@@ -531,7 +543,50 @@ void handleMonitor() {
         if(i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
+
+      // --- 繪製時間軸 (直接畫在 lineChart 的底部) ---
+      // 1. 畫一條 X 軸線 (在主圖底部)
+      const axisY = h - 10; // 軸線位置：距離底部 10px
+      ctx.beginPath();
+      ctx.moveTo(0, axisY);
+      ctx.lineTo(w, axisY);
+      ctx.strokeStyle = '#aaa';
+      ctx.stroke();
+
+      // 2. 畫垂直刻度線
+      ctx.strokeStyle = '#555';
+      ctx.lineWidth = 1;
+
+      // 核心：每一個資料點對應 20ms (因為 ESP32 是 20ms broadcast)
+      const MS_PER_POINT = 20; // ← [V1.9] 與 ESP32 的 broadcast 頻率一致
+
+      // 我們希望每 N 個點畫一條刻度線，讓刻度不要太密
+      const GRID_POINTS = 5; // 每 5 個資料點畫一條線 (即每 100ms 一條線)
+      const totalGrids = Math.floor(historyData.length / GRID_POINTS);
+
+      for(let i = 0; i <= totalGrids; i++) {
+        let pointIndex = i * GRID_POINTS;
+        if (pointIndex < historyData.length) {
+          let x = pointIndex * xStep;
+          if (x <= w) {
+            ctx.beginPath();
+            ctx.moveTo(x, axisY);
+            ctx.lineTo(x, axisY + 10); // 向下畫 10px 的刻度線
+            ctx.stroke();
+          }
+        }
+      }
+
+      // 3. 在右下角標註單位
+      ctx.fillStyle = '#aaa';
+      ctx.font = '12px Arial';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(MS_PER_POINT * GRID_POINTS + ' ms/格', w - 5, h - 5);
+
+      // --- END 繪製時間軸 ---
     }
+    // --- END [V1.9] 修正 drawChart 函數 ---
 
     function togglePower() {
       const newState = (JS_PowerState === "OFF") ? "ON" : "OFF";
@@ -553,93 +608,23 @@ void handleMonitor() {
   )rawliteral";
   server.send(200, "text/html", html);
 }
-
-// 1. NTP 時間初始化 (UTC+8 台灣時區)
-void initNTP() {
-    // 參數：時區偏移秒數(8小時*3600), 日光節約時間(無=0), NTP伺服器
-    configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-    Serial.println("Waiting for NTP time sync...");
-    struct tm timeinfo;
-    while (!getLocalTime(&timeinfo)) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println("\nNTP Sync Successful!");
-    
-    // 取得時間後，立刻下指令給 M031 更新 RTC
-    sendTimeToM031(&timeinfo);
-}
-
-// 2. 將時間下發給 M031
-void sendTimeToM031(struct tm *timeinfo) {
-    char dataBuf[32];
-    // 轉為 ST2026,07,08,15,30,00 格式
-    snprintf(dataBuf, sizeof(dataBuf), "%04d,%02d,%02d,%02d,%02d,%02d",
-             timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
-             timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
-    sendToM031_JIG_8CP("ST", dataBuf);
-}
-
-// 3. 讀取 SD 卡並一次性回傳給 M031
-void sendConfigToM031() {
-    File file = SD.open("/PowerSet/config.txt");
-    if (!file) {
-        Serial.println("Failed to open config.txt");
-        return;
-    }
-    
-    // 假設讀取到的參數為 voltageLimit 和 currentLimit
-    String configData = file.readStringUntil('\n'); // 根據您的 TXT 格式解析
-    file.close();
-    
-    // 假設解析後得到 12.5 和 1000.0
-    // 直接將 Data 一次性給 M031
-    sendToM031_JIG_8CP("CF", "12.5,1000.0"); 
-}
-
-// 4. [🔴 開始錄製測試報告] 產生含 millis() 毫秒的 CSV 日期時間字串
-String getCSVStartTime() {
-    struct tm timeinfo;
-    if (!getLocalTime(&timeinfo)) {
-        return "Time_Not_Synced";
-    }
-    
-    char timeStringBuff[64];
-    // 將 YYYY/MM/DD HH:MM:SS 與 millis() 結合成毫秒格式
-    // 由於 millis() 是持續累加的，我們用 millis() % 1000 來取得當下精準的毫秒尾數
-    snprintf(timeStringBuff, sizeof(timeStringBuff), "%04d/%02d/%02d %02d:%02d:%02d.%03lu",
-             timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-             timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
-             millis() % 1000);
-             
-    return String(timeStringBuff);
-}
-
 void handleApiData() {
   String json = "{\"mA\":" + String(current_mA) + ",\"v\":" + String(current_V) + ",\"power\":\"" + power_state + "\",\"warning\":\"" + systemWarning + "\",\"mAh\":" + String(cumulative_mAh, 4) + ",\"mWh\":" + String(cumulative_mWh, 4) + ",\"logging\":" + (isRecordingCSV ? "true" : "false") + "}";
   server.send(200, "application/json", json);
 }
 
-// ==========================================
-// [Web 控制按鈕接收器] 
-// ==========================================
 void handleApiPower() {
   if (server.hasArg("state")) {
     String state = server.arg("state");
     if (state == "ON") {
       sendToM031_JIG_8CP("PW", "PA8ON"); 
-      power_state = "ON"; 
-      systemWarning = ""; 
-      cumulative_mAh = 0.0; cumulative_mWh = 0.0; 
-      overCurrentStartTime = 0;
-      lastPdTime = millis(); // 給 Watchdog 寬限期
-      powerOnTime = millis(); // [新增] 給硬體啟動寬限期，避免瞬間突波被判斷為超限
+      power_state = "ON"; systemWarning = ""; cumulative_mAh = 0.0; cumulative_mWh = 0.0; overCurrentStartTime = 0; lastPdTime = millis(); powerOnTime = millis(); 
     } else {
-      sendToM031_JIG_8CP("PW", "PA8OFF"); 
-      power_state = "OFF";
+      sendToM031_JIG_8CP("PW", "PA8OFF"); power_state = "OFF";
+      systemWarning = ""; // 【修復點：手動斷電時清空警報字串，徹底解鎖網頁 Alert 視窗】
       if (isRecordingCSV) { csvFile.close(); isRecordingCSV = false; }
     }
-    broadcastWebSocket(); // 主動告訴前端按鈕狀態已變更
+    broadcastWebSocket();
     server.send(200, "text/plain", "OK");
   }
 }
@@ -650,18 +635,18 @@ void handleApiSaveConfig() {
   if (server.hasArg("minVol")) conf_minVoltage = server.arg("minVol").toFloat();
   if (server.hasArg("maxVol")) conf_maxVoltage = server.arg("maxVol").toFloat();
   if (server.hasArg("dur")) conf_limitDuration = server.arg("dur").toInt();
-  savePowerConfig(); server.send(200, "text/plain", "OK");
+  
+  savePowerConfig(); // 儲存至 ESP32 本端 SD 卡
+  
+  sendConfigToM031(); // 【新增：即時同步】主動發送下發 [CF] 封包給 M031 更新硬體熔斷保護臨界值
+  
+  server.send(200, "text/plain", "OK");
 }
 
 void handleDownloadCSV() {
   if (server.hasArg("file")) {
     String path = "/logs/" + server.arg("file");
-    if (SD.exists(path)) {
-      File f = SD.open(path, FILE_READ);
-      server.streamFile(f, "text/csv");
-      f.close();
-      return;
-    }
+    if (SD.exists(path)) { File f = SD.open(path, FILE_READ); server.streamFile(f, "text/csv"); f.close(); return; }
   }
   server.send(404, "text/plain", "Log File Not Found");
 }
@@ -669,6 +654,143 @@ void handleDownloadCSV() {
 void handleNotFound() {
   if (isAPMode) { server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true); server.send(302, "text/plain", ""); } 
   else { server.send(404, "text/plain", "Not Found"); }
+}
+
+// ==========================================
+// [通訊與網路模組核心]
+// ==========================================
+// ... (WIFI and LED Setup remain unchanged)
+void setLedState(LedState state) { currentLedState = state; failBlinkCount = 0; ledStateHigh = false; digitalWrite(WIFI_LED_PIN, LOW); previousLedMillis = millis(); }
+void updateLED() { unsigned long cm = millis(); if (currentLedState == LED_ON) { digitalWrite(WIFI_LED_PIN, HIGH); } else if (currentLedState == LED_OFF) { digitalWrite(WIFI_LED_PIN, LOW); } else if (currentLedState == LED_BLINK_CONNECTING) { if (cm - previousLedMillis >= 500) { previousLedMillis = cm; ledStateHigh = !ledStateHigh; digitalWrite(WIFI_LED_PIN, ledStateHigh ? HIGH : LOW); } } else if (currentLedState == LED_BLINK_FAIL) { if (failBlinkCount < 8) { if (cm - previousLedMillis >= 100) { previousLedMillis = cm; ledStateHigh = !ledStateHigh; digitalWrite(WIFI_LED_PIN, ledStateHigh ? HIGH : LOW); failBlinkCount++; } } else { digitalWrite(WIFI_LED_PIN, LOW); currentLedState = LED_OFF; } } }
+void startAPMode() { isAPMode = true; WiFi.mode(WIFI_AP); WiFi.softAP("JIG_8FT_P1_WIFIset"); dnsServer.start(DNS_PORT, "*", WiFi.softAPIP()); }
+void setupWiFi() {
+  setLedState(LED_BLINK_CONNECTING); WiFi.mode(WIFI_STA); WiFi.disconnect(); delay(100);
+  int n = WiFi.scanNetworks(); MatchedWiFi matches[5]; int matchCount = 0; bool anyConnected = false;
+  if (n > 0) {
+    for (int i = 0; i < n; ++i) {
+      String scannedSSID = WiFi.SSID(i); int32_t scannedRSSI = WiFi.RSSI(i);
+      for (int j = 0; j < 5; j++) { if (wifiList[j].ssid != "" && wifiList[j].ssid == scannedSSID) { bool alreadyAdded = false; for(int k=0; k<matchCount; k++) { if(matches[k].ssid == scannedSSID) { alreadyAdded = true; if(scannedRSSI > matches[k].rssi) matches[k].rssi = scannedRSSI; break; } } if(!alreadyAdded && matchCount < 5) { matches[matchCount].ssid = wifiList[j].ssid; matches[matchCount].pass = wifiList[j].pass; matches[matchCount].rssi = scannedRSSI; matchCount++; } } }
+    }
+  }
+  for (int i = 0; i < matchCount - 1; i++) { for (int j = i + 1; j < matchCount; j++) { if (matches[j].rssi > matches[i].rssi) { MatchedWiFi temp = matches[i]; matches[i] = matches[j]; matches[j] = temp; } } }
+  for (int i = 0; i < matchCount; i++) { WiFi.begin(matches[i].ssid.c_str(), matches[i].pass.c_str()); int attempts = 0; while (WiFi.status() != WL_CONNECTED && attempts < 20) { delay(500); updateLED(); attempts++; } if (WiFi.status() == WL_CONNECTED) { anyConnected = true; break; } }
+  if (!anyConnected) { for (int i = 0; i < 5; i++) { if (wifiList[i].ssid == "") continue; WiFi.begin(wifiList[i].ssid.c_str(), wifiList[i].pass.c_str()); int attempts = 0; while (WiFi.status() != WL_CONNECTED && attempts < 20) { delay(500); updateLED(); attempts++; } if (WiFi.status() == WL_CONNECTED) { anyConnected = true; break; } } }
+  
+  if (anyConnected) { setLedState(LED_ON); isAPMode = false; initNTP(); } 
+  else { setLedState(LED_BLINK_FAIL); startAPMode(); }
+}
+
+void initNTP() {
+    configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+    struct tm timeinfo;
+    int retry = 0;
+    while (!getLocalTime(&timeinfo) && retry < 10) { delay(500); retry++; }
+    if (retry < 10) { sendTimeToM031(&timeinfo); }
+}
+
+void sendTimeToM031(struct tm *timeinfo) {
+    char dataBuf[32]; snprintf(dataBuf, sizeof(dataBuf), "%04d,%02d,%02d,%02d,%02d,%02d", timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday, timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+    sendToM031_JIG_8CP("ST", dataBuf);
+}
+
+void sendConfigToM031() {
+    char dataBuf[64]; snprintf(dataBuf, sizeof(dataBuf), "%.1f,%.1f,%.1f,%.1f,%d", conf_maxScale, conf_limitScale, conf_minVoltage, conf_maxVoltage, conf_limitDuration);
+    sendToM031_JIG_8CP("CF", dataBuf); 
+}
+
+void broadcastWebSocket() {
+  String wsJson = "{\"mA\":" + String(current_mA, 1) + ",\"v\":" + String(current_V, 2) + ",\"power\":\"" + power_state + "\"" + ",\"warning\":\"" + systemWarning + "\"" + ",\"mAh\":" + String(cumulative_mAh, 4) + ",\"mWh\":" + String(cumulative_mWh, 4) + ",\"logging\":" + (isRecordingCSV ? "true" : "false") + "}";
+  
+  // --- [V1.8] Debug Print ---
+  Serial.println("WS Broadcast: " + wsJson);
+  // --- END [V1.8] Debug Print ---
+
+  webSocket.broadcastTXT(wsJson);
+}
+
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  if (type == WStype_CONNECTED) { sendToM031_JIG_8CP("PW", "?"); broadcastWebSocket(); }
+  else if (type == WStype_TEXT) {
+    String msg = String((char*)payload);
+    if (msg.startsWith("REC_START:")) {
+      logFilename = msg.substring(10); if (!logFilename.endsWith(".csv")) logFilename += ".csv";
+      String fullPath = "/logs/" + logFilename; csvFile = SD.open(fullPath.c_str(), FILE_WRITE);
+      if (csvFile) { const uint8_t bom[] = {0xEF, 0xBB, 0xBF}; csvFile.write(bom, sizeof(bom)); csvFile.println("日期時間(含毫秒),電壓(V),電流(mA),容量(mAh),能量(mWh)"); isRecordingCSV = true; broadcastWebSocket(); }
+    } else if (msg == "REC_STOP") { if (isRecordingCSV) { csvFile.close(); isRecordingCSV = false; broadcastWebSocket(); } }
+  }
+}
+
+String getCSVStartTime() {
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) { return String(millis()); }
+    char timeStringBuff[64]; snprintf(timeStringBuff, sizeof(timeStringBuff), "%04d/%02d/%02d %02d:%02d:%02d.%03lu", timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, millis() % 1000);
+    return String(timeStringBuff);
+}
+
+void checkSafetyLimits() {
+  unsigned long currentMillis = millis(); bool stateChanged = false;
+
+  // --- 檢查 M032 是否停止發送 PD 指令 ---
+  const unsigned long PD_TIMEOUT_MS = 10000; 
+  if (currentMillis - lastPdTime > PD_TIMEOUT_MS) { 
+    if (power_state == "ON") { 
+      power_state = "OFF"; 
+      overCurrentStartTime = 0; 
+      if (isRecordingCSV) { csvFile.close(); isRecordingCSV = false; } 
+      stateChanged = true; 
+      systemWarning = "【M032 通訊逾時】超過 " + String(PD_TIMEOUT_MS/1000.0, 1) + " 秒未收到電力數據，自動斷電保護！";
+      safetyTripOccurred = true; 
+    }
+  }
+
+  // --- 檢查硬體安全限制 ---
+  if (power_state == "ON") { // 只有在通電時才檢查
+    if (currentMillis - powerOnTime > 2000) {
+        // 檢查電壓
+        if (current_V < conf_minVoltage || current_V > conf_maxVoltage) {
+          if (!safetyTripOccurred) {
+            sendToM031_JIG_8CP("PW", "PA8OFF"); 
+            systemWarning = "【電壓超標熔斷】實時電壓 " + String(current_V, 2) + "V 觸及安全邊界！";
+            safetyTripOccurred = true; 
+            if (isRecordingCSV) { csvFile.println("ERROR,電壓超標安全熔斷"); csvFile.close(); isRecordingCSV = false; }
+            stateChanged = true;
+            power_state = "OFF";
+          }
+        }
+        // 檢查電流
+        else if (current_mA > conf_limitScale) {
+          if (overCurrentStartTime == 0) overCurrentStartTime = currentMillis;
+          else if (currentMillis - overCurrentStartTime >= conf_limitDuration * 1000UL) {
+            if (!safetyTripOccurred) {
+              sendToM031_JIG_8CP("PW", "PA8OFF");
+              systemWarning = "【電流超載延時熔斷】電流連續超標！";
+              safetyTripOccurred = true; 
+              if (isRecordingCSV) { csvFile.println("ERROR,電流超載安全熔斷"); csvFile.close(); isRecordingCSV = false; }
+              overCurrentStartTime = 0;
+              stateChanged = true;
+              power_state = "OFF"; 
+            }
+          }
+        } else { overCurrentStartTime = 0; }
+    }
+  }
+
+  // --- 修正：清除邏輯 (在狀態穩定後) ---
+  
+  // 【刪除情況1】: 不要急著在這裡清除 systemWarning，保留給 WebSocket 發送給網頁！
+  // 網頁接收到警告並彈出視窗後，只要使用者重新按下電源開關(handleApiPower)，警告字串自然會被清空。
+
+  // 情況2: 電源狀態為 ON (例如用戶手動打開) -> 重置標記，準備下次保護
+  if (power_state == "ON" && safetyTripOccurred) {
+      safetyTripOccurred = false; // 重置保護觸發標記
+      Serial.println("Reset Tripped Flag (ON)"); // Debug
+  }
+
+  // --- END 修正 ---
+
+  if (stateChanged) { 
+      broadcastWebSocket(); 
+  }
 }
 
 void sendToM031_JIG_8CP(String cmd, String data) {
@@ -692,8 +814,7 @@ void processM031Command(String packet) {
   if (packet.length() < 4) return; 
   String cmdData = packet.substring(0, packet.length() - 2);
   String receivedChk = packet.substring(packet.length() - 2);
-  unsigned int sum = 0;
-  for (int i = 0; i < cmdData.length(); i++) { sum += cmdData[i]; }
+  unsigned int sum = 0; for (int i = 0; i < cmdData.length(); i++) { sum += cmdData[i]; }
   char calcChk[3]; sprintf(calcChk, "%02X", sum & 0xFF);
   if (receivedChk != String(calcChk)) return; 
 
@@ -703,37 +824,57 @@ void processM031Command(String packet) {
     String currentIP = isAPMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
     sendToM031_JIG_8CP("WI", currentIP); 
   }
-  else if (cmd == "PW") {
-    if (data.indexOf("ON") >= 0) {
-      if (power_state != "ON") {
-        powerOnTime = millis(); // [新增] 如果是實體按鈕開電，同樣給予啟動寬限期
-        lastPdTime = millis();
-      }
-      power_state = "ON";
+  else if (cmd == "GC" && data == "?") { sendConfigToM031(); }
+  
+  // ===============================================
+  // [新增] 接收 M031 的鬧鐘相關請求
+  // ===============================================
+  else if (cmd == "AL" && data == "?") {
+    // M031 開機請求讀取全域 6 組鬧鐘
+    // 清空 M031 端可能存在的舊設定（可選，確保一致性）
+    // for(int i = 0; i < 6; i++) { sendToM031_JIG_8CP("AL", String(i)+",0,0,0,0"); }
+    for(int i = 0; i < 6; i++) {
+       char buf[32];
+       snprintf(buf, sizeof(buf), "%d,%02d,%02d,%02d,%d", i, alarms[i].h, alarms[i].m, alarms[i].s, alarms[i].en);
+       sendToM031_JIG_8CP("AL", buf);
+       delay(80); // 必須有小延遲，防止 M031 UART 處理不及漏封包
     }
+    // 發送完畢後，可選發送一個結束標誌（雖然 M032 不一定處理）
+    // sendToM031_JIG_8CP("AL_END", "");
+  }
+  // --- 修改：處理 M031 的 AS 請求 ---
+  else if (cmd == "AS") {
+    // M031 按下黃色鍵離開選單，要求存入 SD 卡
+    int idx=0, h=0, m=0, s=0, en=0;
+    if (sscanf(data.c_str(), "%d,%d,%d,%d,%d", &idx, &h, &m, &s, &en) == 5) {
+       if(idx >= 0 && idx < 6) {
+          alarms[idx].h = h; alarms[idx].m = m; alarms[idx].s = s; alarms[idx].en = en;
+          saveAlarmsConfig(); // 直接更新寫入
+          // 回應 OK 確認 (新增)
+          sendToM031_JIG_8CP("AS_OK", "OK");
+       }
+    }
+  }
+  // ===============================================
+  
+  else if (cmd == "ST" && data == "OK") { Serial.println("RTC Sync OK"); }
+  else if (cmd == "PW") {
+    if (data.indexOf("ON") >= 0) { if (power_state != "ON") { powerOnTime = millis(); lastPdTime = millis(); } power_state = "ON"; }
     else if (data.indexOf("OFF") >= 0) power_state = "OFF";
     broadcastWebSocket();
   }
   else if (cmd == "PD") {
-    lastPdTime = millis(); 
-
+    unsigned long currentMillis = millis(); float deltaSec = 0.0;
+    if (lastPdTime > 0) { deltaSec = (currentMillis - lastPdTime) / 1000.0; if (deltaSec > 2.0 || deltaSec <= 0) deltaSec = 0.1; }
+    lastPdTime = currentMillis; 
     int commaIdx = data.indexOf(',');
-    if(commaIdx > 0) {
-      current_mA = data.substring(0, commaIdx).toFloat();
-      current_V = data.substring(commaIdx + 1).toFloat();
-    }
-
+    if(commaIdx > 0) { current_mA = data.substring(0, commaIdx).toFloat(); current_V = data.substring(commaIdx + 1).toFloat(); }
     if (power_state == "ON") {
-      cumulative_mAh += current_mA * (0.25 / 3600.0);
-      cumulative_mWh += (current_mA * current_V) * (0.25 / 3600.0);
-
+      cumulative_mAh += current_mA * (deltaSec / 3600.0); cumulative_mWh += (current_mA * current_V) * (deltaSec / 3600.0);
       if (isRecordingCSV && csvFile) {
-        csvFile.printf("%lu,%.2f,%.1f,%.4f,%.4f\n", millis(), current_V, current_mA, cumulative_mAh, cumulative_mWh);
-        csvFile.flush(); 
+        csvFile.printf("%s,%.2f,%.1f,%.4f,%.4f\n", getCSVStartTime().c_str(), current_V, current_mA, cumulative_mAh, cumulative_mWh);
+        static unsigned long lastFlushTime = 0; if (currentMillis - lastFlushTime >= 1000) { csvFile.flush(); lastFlushTime = currentMillis; }
       }
     }
-    
-    // M031 定期回報時，也推播給網頁
-    broadcastWebSocket();
   }
 }

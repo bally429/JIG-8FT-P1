@@ -2296,8 +2296,8 @@ const unsigned char font_8x16[] = {
 };
 
 
-
-#define SPI_CLK_FREQ    2000000
+#undef SPI_CLK_FREQ
+#define SPI_CLK_FREQ   20000000 // 調高到 10MHz 2000000
 
 // 修改後：
 #define WAIT_SPI_IDLE(spi)  while(SPI_IS_BUSY(spi)) {}
@@ -2361,18 +2361,22 @@ void OLED_PrintString(int x, int y, int min_y, int max_y, const char *str, uint8
 
 // 5. 將 8KB 顯存一波流轟炸到 OLED (極速不閃屏)
 void OLED_Update(void) {
-    vWriteCommand(0x15); vWriteData(0x1C); vWriteData(0x5B); // 全寬度
-    vWriteCommand(0x75); vWriteData(0x00); vWriteData(0x3F); // 全高度
-    vWriteCommand(0x5C); // 開啟寫入
+    vWriteCommand(0x15); vWriteData(0x1C); vWriteData(0x5B); // Column Address
+    vWriteCommand(0x75); vWriteData(0x00); vWriteData(0x3F); // Row Address
+    vWriteCommand(0x5C); // Write RAM Command
     
-    OLED_DATAMODE;
+    OLED_DATAMODE; // 確保 Data Mode
+
+    // 傳送所有資料
     for(int r = 0; r < 64; r++) {
         for(int c = 0; c < 128; c++) {
-            WAIT_SPI_IDLE(SPI0); 
-            SPI_WRITE_TX(SPI0, OLED_GRAM[r][c]); // 直接塞進硬體 FIFO
+            // 如果 SPI FIFO 有空間，就寫入 (檢查狀態寄存器)
+            while(!(SPI0->STATUS & SPI_STATUS_TXEMPTY_Msk)); // 等待 FIFO 有空間
+            SPI_WRITE_TX(SPI0, OLED_GRAM[r][c]);
         }
     }
-    WAIT_SPI_IDLE(SPI0);
+    // 在所有資料都放入 FIFO 後，等待傳輸完成
+    while(SPI_IS_BUSY(SPI0));
 }
 
 // 保留相容性
@@ -2393,7 +2397,7 @@ void vOLED_INIT()
     /*---------------------------------------------------------------------------------------------------------*/
     /* Configure as a master, clock idle low, 32-bit transaction, drive output on falling clock edge and latch input on rising edge. */
     /* Set IP clock divider. SPI clock rate = 2 MHz */
-    SPI_Open(SPI0, SPI_MASTER, SPI_MODE_3, 8, SPI_CLK_FREQ);
+    SPI_Open(SPI0, SPI_MASTER, SPI_MODE_3, 8, SPI_CLK_FREQ); // 使用新的頻率
 
     /* Enable the automatic hardware slave select function. Select the SS pin and configure as low-active. */
     SPI_EnableAutoSS(SPI0, SPI_SS, SPI_SS_ACTIVE_LOW);
