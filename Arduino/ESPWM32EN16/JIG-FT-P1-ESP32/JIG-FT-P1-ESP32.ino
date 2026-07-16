@@ -5,7 +5,7 @@
  * [版本更新紀錄]
  * -------------------------------------------------------------------------------------------
  * V1.5    2026/07/08 [核心安全升級] Web圖表擴增時間軸、網格與刻度；導入隨機斷訊與超限熔斷機制。
- * V1.6    2026/07/08 移除輪詢改用 WebSocket，新增容量與能量計量，修正 CSV 首列亂碼。
+ * V1.6    2026/07/08 移除輪 polled 改用 WebSocket，新增容量與能量計量，修正 CSV 首列亂碼。
  * V1.7    2026/07/09 [防護與人機優化] 
  * 1. 修正電壓保護邏輯：僅在電源 ON 時觸發防禦，徹底根除關電時「零點飄移」造成的連環警報。
  * 2. 實作參數即時同步：點擊網頁保存時，同步發送 [CF] 封包下發給 M031 更新保護硬體。
@@ -18,10 +18,21 @@
  * 1. 將 ESP32 WebSocket 廣播頻率從 50ms 調整為 20ms，與 M032 的 PD 指令發送頻率同步。
  * 2. 將時間軸繪製整合至主圖 lineChart，移除獨立的 timeAxisChart canvas，確保刻度與數據點精確對齊。
  * 3. 圖表時間軸單位從 50ms/格調整為 20ms/格，與廣播頻率一致。
+ * V2.0    2026/07/16 [SD卡檔案管理功能] 
+ * 1. 在首頁增加「📂 SD卡資料夾」按鈕。
+ * 2. Web 檔案總管介面：實作了一個類似隨身碟的網頁介面，支援：
+ *    - 瀏覽：點擊資料夾進入下一層。
+ *    - 下載：點擊檔案即可下載到電腦。
+ *    - 線上編輯：點擊 .txt 或 .csv 等文字檔，會開啟編輯器，修改後點擊儲存可直接覆蓋 SD 卡內的原始檔案。
+ *    - 上傳：支援將電腦檔案拖曳或選擇上傳至當前資料夾。
+ *    - 刪除：可刪除不需要的檔案或空資料夾。
+ * V2.1    2026/07/16 [電源狀態保護優化]
+ * 1. 修正當開啟電源後若沒有電流，不執行任何保護動作，也不發送關閉電源指令給 M031。
+ * 2. 僅在有實際電流的情況下進行超載保護檢查。
  * ===========================================================================================
  * */
 
-#define FIRMWARE_VERSION "V1.9"
+#define FIRMWARE_VERSION "V2.1"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
@@ -137,6 +148,19 @@ void processM031Command(String packet);
 void readHostUART();
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length);
 
+// --- [V2.0] 新增函式宣告：SD卡檔案管理 ---
+void handleSdCard();
+void handleSdBrowse();
+void handleSdDownload();
+void handleSdUpload();
+void handleSdDelete();
+void handleSdEdit();
+void handleSdSaveFile();
+String getContentType(String filename);
+String getIconClass(const String& name, bool isDir);
+String urlDecode(String str);
+bool isTextFile(const String& filename);
+
 void setup() {
   Serial.begin(115200); 
   Serial2.begin(115200, SERIAL_8N1, SCANNER_RX_PIN, SCANNER_TX_PIN);
@@ -162,7 +186,16 @@ void setup() {
   server.on("/api/data", handleApiData);     
   server.on("/api/power", HTTP_POST, handleApiPower);   
   server.on("/api/saveConfig", HTTP_POST, handleApiSaveConfig); 
-  server.on("/api/downloadCSV", handleDownloadCSV); 
+  server.on("/api/downloadCSV", handleDownloadCSV);
+  // --- [V2.0] 新增路由 ---
+  server.on("/sdcard", handleSdCard);
+  server.on("/sd/browse", handleSdBrowse);
+  server.on("/sd/download", handleSdDownload);
+  server.on("/sd/upload", HTTP_POST, handleSdUpload);
+  server.on("/sd/delete", HTTP_POST, handleSdDelete);
+  server.on("/sd/edit", handleSdEdit);
+  server.on("/sd/save", HTTP_POST, handleSdSaveFile);
+  // --- END [V2.0] 新增路由 ---
   server.onNotFound(handleNotFound); 
   server.begin();
 
@@ -202,6 +235,9 @@ void setupSDCard() {
   if (!SD.exists("/Users")) SD.mkdir("/Users");
   if (!SD.exists("/PowerSet")) SD.mkdir("/PowerSet");
   if (!SD.exists("/logs")) SD.mkdir("/logs"); 
+  // --- [V2.0] 新增測試目錄 ---
+  if (!SD.exists("/test")) SD.mkdir("/test");
+  // --- END [V2.0] 新增測試目錄 ---
 }
 
 // ... (WiFi & PowerConfig load/save functions remain exactly the same) ...
@@ -287,8 +323,401 @@ void saveAlarmsConfig() {
 }
 
 // ==========================================
-// [Web Server UI 與 API]
+// [新增] SD卡檔案管理功能函式
 // ==========================================
+
+String getIconClass(const String& name, bool isDir) {
+  if (isDir) return "📁";
+  String ext = name.substring(name.lastIndexOf('.'));
+  if (ext.equalsIgnoreCase(".txt") || ext.equalsIgnoreCase(".csv") || ext.equalsIgnoreCase(".json") || ext.equalsIgnoreCase(".xml") || ext.equalsIgnoreCase(".ini") || ext.equalsIgnoreCase(".cfg")) {
+    return "📝";
+  } else if (ext.equalsIgnoreCase(".jpg") || ext.equalsIgnoreCase(".jpeg") || ext.equalsIgnoreCase(".png") || ext.equalsIgnoreCase(".gif") || ext.equalsIgnoreCase(".bmp")) {
+    return "🖼️";
+  } else if (ext.equalsIgnoreCase(".pdf")) {
+    return "📄";
+  } else if (ext.equalsIgnoreCase(".zip") || ext.equalsIgnoreCase(".rar") || ext.equalsIgnoreCase(".7z")) {
+    return "📦";
+  }
+  return "📄";
+}
+
+String urlDecode(String str) {
+  String decoded = "";
+  char c;
+  for (int i = 0; i < str.length(); i++) {
+    c = str.charAt(i);
+    if (c == '+') {
+      decoded += ' ';
+    } else if (c == '%' && i + 2 < str.length()) {
+      char hex[3] = {str.charAt(i+1), str.charAt(i+2), 0};
+      decoded += (char) strtol(hex, NULL, 16);
+      i += 2;
+    } else {
+      decoded += c;
+    }
+  }
+  return decoded;
+}
+
+bool isTextFile(const String& filename) {
+  String ext = filename.substring(filename.lastIndexOf('.'));
+  return (ext.equalsIgnoreCase(".txt") || ext.equalsIgnoreCase(".csv") || ext.equalsIgnoreCase(".json") || ext.equalsIgnoreCase(".xml") || ext.equalsIgnoreCase(".ini") || ext.equalsIgnoreCase(".cfg") || ext.equalsIgnoreCase(".log"));
+}
+
+void handleSdCard() {
+  String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>SD Card File Manager</title><style>body{font-family: Arial, sans-serif; text-align: center; padding: 40px; background-color: #f4f4f9;} .btn {display: block; width: 80%; max-width: 300px; margin: 20px auto; padding: 20px; font-size: 20px; font-weight: bold; color: white; background-color: #0056b3; border: none; border-radius: 10px; cursor: pointer; text-decoration: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px;} .btn:hover {background-color: #004494;} .btn.alt {background-color: #28a745;} .btn.alt:hover {background-color: #218838;} .btn.alt2 {background-color: #f39c12;} .btn.alt2:hover {background-color: #e67e22;} .btn.sd {background-color: #8e44ad;} .btn.sd:hover {background-color: #7d3c98;}</style></head><body><h2>💾 SD Card Management</h2><a href='/' class='btn'>🏠 返回首頁</a><a href='/sd/browse' class='btn sd'>📂 瀏覽 SD 卡</a></body></html>)rawliteral";
+  server.send(200, "text/html", html);
+}
+
+void handleSdBrowse() {
+  String path = server.arg("path");
+  if (path == "") path = "/";
+  if (path.charAt(0) != '/') path = "/" + path;
+  if (path.charAt(path.length()-1) != '/') path += "/";
+
+  File root = SD.open(path);
+  if (!root || !root.isDirectory()) {
+    server.send(404, "text/plain", "Directory not found");
+    return;
+  }
+
+  String html = R"rawliteral(
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>SD Card Browser</title>
+    <style>
+      body { font-family: Arial, sans-serif; background-color: #f4f4f9; padding: 20px; }
+      .header { background: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+      .file-list { background: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); overflow: hidden; }
+      .file-item { padding: 12px 15px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+      .file-item:last-child { border-bottom: none; }
+      .file-name { font-weight: bold; color: #333; cursor: pointer; }
+      .file-name:hover { color: #007bff; }
+      .file-info { color: #666; font-size: 0.9em; }
+      .file-actions a { margin-left: 10px; text-decoration: none; font-weight: bold; color: #007bff; }
+      .file-actions a.delete { color: #dc3545; }
+      .file-actions a.edit { color: #28a745; }
+      .upload-section { background: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-top: 20px; }
+      .back-btn { display: inline-block; margin-bottom: 15px; text-decoration: none; color: #0056b3; font-weight: bold; }
+      .upload-area { border: 2px dashed #ccc; padding: 20px; text-align: center; border-radius: 5px; margin-top: 10px; }
+      .upload-area.dragover { border-color: #007bff; background-color: #f8f9fa; }
+    </style>
+  </head>
+  <body>
+    <a href='/sdcard' class='back-btn'>🏠 SD 卡總覽</a>
+    <div class='header'>
+      <h2>📂 Current Path: )rawliteral" + path + R"rawliteral(</h2>
+    </div>
+    <div class='file-list'>
+  )rawliteral";
+
+  File file = root.openNextFile();
+  while (file) {
+    String fileName = file.name();
+    String displayName = fileName.substring(fileName.lastIndexOf('/') + 1);
+    String sizeStr = file.isDirectory() ? "(dir)" : String(file.size()) + " bytes";
+    bool isDir = file.isDirectory();
+
+    html += "<div class='file-item'>";
+    html += "<div class='file-name' onclick=\"location.href='/sd/browse?path=" + path + displayName + "'\">" + getIconClass(displayName, isDir) + " " + displayName + "</div>";
+    html += "<div class='file-info'>" + sizeStr + "</div>";
+    html += "<div class='file-actions'>";
+    if (!isDir) {
+        html += "<a href='/sd/download?file=" + path + displayName + "'>⬇️ Download</a>";
+        if (isTextFile(displayName)) {
+            html += "<a href='/sd/edit?file=" + path + displayName + "' class='edit'>✏️ Edit</a>";
+        }
+        html += "<a href='#' class='delete' onclick='deleteFile(\"" + path + displayName + "\")'>🗑️ Delete</a>";
+    } else {
+        html += "<a href='#' class='delete' onclick='deleteFolder(\"" + path + displayName + "\")'>🗑️ Delete</a>";
+    }
+    html += "</div>";
+    html += "</div>";
+
+    file = root.openNextFile();
+  }
+  root.close();
+
+  html += R"rawliteral(
+    </div>
+    <div class='upload-section'>
+      <h3>📤 Upload to this folder</h3>
+      <form id='uploadForm' enctype='multipart/form-data' method='post' action='/sd/upload'>
+        <input type='hidden' name='path' value=')rawliteral" + path + R"rawliteral('>
+        <input type='file' name='upload' required>
+        <button type='submit'>Upload</button>
+      </form>
+      <div id='dropArea' class='upload-area'>
+        <p>Drag & Drop files here or click to select</p>
+        <input type='file' id='hiddenFileInput' style='display: none;' multiple>
+      </div>
+    </div>
+
+    <script>
+      function deleteFile(filePath) {
+        if (confirm('Are you sure you want to delete ' + filePath + '?')) {
+          fetch('/sd/delete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: 'file=' + encodeURIComponent(filePath)
+          }).then(response => response.text()).then(result => {
+            if(result === 'OK') location.reload();
+            else alert('Delete failed: ' + result);
+          });
+        }
+      }
+      function deleteFolder(folderPath) {
+        if (confirm('Are you sure you want to delete folder ' + folderPath + '? Only empty folders can be deleted.')) {
+          fetch('/sd/delete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: 'folder=' + encodeURIComponent(folderPath)
+          }).then(response => response.text()).then(result => {
+            if(result === 'OK') location.reload();
+            else alert('Delete failed: ' + result);
+          });
+        }
+      }
+
+      // Drag & drop functionality
+      const dropArea = document.getElementById('dropArea');
+      const hiddenFileInput = document.getElementById('hiddenFileInput');
+
+      ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        dropArea.addEventListener(eventName, preventDefaults, false);
+      });
+
+      function preventDefaults(e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+
+      ['dragenter', 'dragover'].forEach(eventName => {
+        dropArea.addEventListener(eventName, highlight, false);
+      });
+
+      ['dragleave', 'drop'].forEach(eventName => {
+        dropArea.addEventListener(eventName, unhighlight, false);
+      });
+
+      function highlight(e) {
+        dropArea.classList.add('dragover');
+      }
+
+      function unhighlight(e) {
+        dropArea.classList.remove('dragover');
+      }
+
+      dropArea.addEventListener('drop', handleDrop, false);
+
+      function handleDrop(e) {
+        const dt = e.dataTransfer;
+        const files = dt.files;
+        uploadFiles(files);
+      }
+
+      dropArea.addEventListener('click', () => {
+        hiddenFileInput.click();
+      });
+
+      hiddenFileInput.addEventListener('change', (e) => {
+        uploadFiles(e.target.files);
+      });
+
+      function uploadFiles(files) {
+        const formData = new FormData();
+        const path = document.querySelector('input[name="path"]').value;
+        for (let i = 0; i < files.length; i++) {
+          formData.append('files', files[i]);
+        }
+        formData.append('path', path);
+
+        fetch('/sd/upload', {
+          method: 'POST',
+          body: formData
+        }).then(response => response.text()).then(result => {
+          if(result === 'OK') location.reload();
+          else alert('Upload failed: ' + result);
+        });
+      }
+    </script>
+  </body>
+  </html>
+  )rawliteral";
+
+  server.send(200, "text/html", html);
+}
+
+void handleSdDownload() {
+  String filePath = server.arg("file");
+  if (filePath == "" || !SD.exists(filePath)) {
+    server.send(404, "text/plain", "File Not Found");
+    return;
+  }
+  File file = SD.open(filePath, FILE_READ);
+  if (!file) {
+    server.send(500, "text/plain", "Could not open file");
+    return;
+  }
+  server.streamFile(file, "application/octet-stream");
+  file.close();
+}
+
+void handleSdUpload() {
+    String path = server.arg("path");
+    if (path == "") path = "/";
+
+    // Handle single file upload via form
+    if (server.hasArg("upload")) {
+        HTTPUpload& upload = server.upload();
+        if (upload.filename != "") {
+            String full_path = path + upload.filename;
+            File f = SD.open(full_path, FILE_WRITE);
+            if (f) {
+                f.write(upload.buf, upload.currentSize);
+                f.close();
+                server.send(200, "text/plain", "OK");
+                return;
+            } else {
+                server.send(500, "text/plain", "Could not create file");
+                return;
+            }
+        }
+    }
+
+    // Handle multipart file uploads (drag & drop)
+    if (server.hasArg("files")) {
+        HTTPUpload& upload = server.upload();
+        if (upload.filename != "") {
+            String full_path = path + upload.filename;
+            File f = SD.open(full_path, FILE_WRITE);
+            if (f) {
+                f.write(upload.buf, upload.currentSize);
+                f.close();
+            } else {
+                server.send(500, "text/plain", "Could not create file: " + full_path);
+                return;
+            }
+        }
+    }
+
+    server.send(200, "text/plain", "OK");
+}
+
+void handleSdDelete() {
+  String fileArg = server.arg("file");
+  String folderArg = server.arg("folder");
+
+  if (fileArg != "") {
+    if (SD.exists(fileArg)) {
+      if (SD.remove(fileArg)) {
+        server.send(200, "text/plain", "OK");
+        return;
+      } else {
+        server.send(500, "text/plain", "Could not delete file");
+        return;
+      }
+    } else {
+      server.send(404, "text/plain", "File not found");
+      return;
+    }
+  }
+
+  if (folderArg != "") {
+    if (SD.exists(folderArg)) {
+      if (SD.rmdir(folderArg)) {
+        server.send(200, "text/plain", "OK");
+        return;
+      } else {
+        server.send(500, "text/plain", "Could not delete folder (not empty?)");
+        return;
+      }
+    } else {
+      server.send(404, "text/plain", "Folder not found");
+      return;
+    }
+  }
+
+  server.send(400, "text/plain", "No file or folder specified");
+}
+
+void handleSdEdit() {
+  String filePath = server.arg("file");
+  if (filePath == "" || !SD.exists(filePath) || !isTextFile(filePath)) {
+    server.send(400, "text/plain", "Invalid file for editing");
+    return;
+  }
+
+  File file = SD.open(filePath, FILE_READ);
+  if (!file) {
+    server.send(500, "text/plain", "Could not open file");
+    return;
+  }
+
+  String content = file.readString();
+  file.close();
+
+  String html = R"rawliteral(
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Edit File: )rawliteral" + filePath + R"rawliteral(</title>
+    <style>
+      body { font-family: Arial, sans-serif; background-color: #f4f4f9; padding: 20px; }
+      .editor-container { background: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 20px; }
+      textarea { width: 100%; height: 60vh; padding: 10px; font-family: monospace; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+      .button-group { margin-top: 15px; display: flex; justify-content: space-between; }
+      button { padding: 10px 20px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; }
+      .save-btn { background-color: #28a745; color: white; }
+      .back-btn { background-color: #6c757d; color: white; }
+    </style>
+  </head>
+  <body>
+    <div class='editor-container'>
+      <h2>✏️ Editing: )rawliteral" + filePath + R"rawliteral(</h2>
+      <form method='post' action='/sd/save'>
+        <input type='hidden' name='file' value=')rawliteral" + filePath + R"rawliteral('>
+        <textarea id='editor' name='content'>)rawliteral" + content + R"rawliteral(</textarea>
+        <div class='button-group'>
+          <a href='/sd/browse?path=)rawliteral" + filePath.substring(0, filePath.lastIndexOf('/')) + R"rawliteral(' class='back-btn'>Back</a>
+          <button type='submit' class='save-btn'>💾 Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </body>
+  </html>
+  )rawliteral";
+
+  server.send(200, "text/html", html);
+}
+
+void handleSdSaveFile() {
+  String filePath = server.arg("file");
+  String content = server.arg("content");
+
+  if (filePath == "" || content == "") {
+    server.send(400, "text/plain", "Missing file or content");
+    return;
+  }
+
+  File file = SD.open(filePath, FILE_WRITE);
+  if (!file) {
+    server.send(500, "text/plain", "Could not open file for writing");
+    return;
+  }
+
+  file.print(content);
+  file.close();
+
+  server.send(200, "text/plain", "OK");
+}
+
+// ... (其余函数保持不变) ...
 void handleRoot() {
   // 動態判定全域使用者尊稱
   String welcomeMsg = "歡迎您使用步進馬達讀卡治具控制台！";
@@ -296,9 +725,9 @@ void handleRoot() {
     welcomeMsg = "歡迎 「" + globalUser + "」 使用步進馬達讀卡治具控制台！";
   }
 
-  String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>JIG-8FT-P1 總控制台</title><style>body{font-family: Arial, sans-serif; text-align: center; padding: 40px; background-color: #f4f4f9;} .btn {display: block; width: 80%; max-width: 300px; margin: 20px auto; padding: 20px; font-size: 20px; font-weight: bold; color: white; background-color: #0056b3; border: none; border-radius: 10px; cursor: pointer; text-decoration: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px;} .btn:hover {background-color: #004494;} .btn.alt {background-color: #28a745;} .btn.alt:hover {background-color: #218838;} .btn.alt2 {background-color: #f39c12;} .btn.alt2:hover {background-color: #e67e22;} .welcome-msg {font-size: 18px; color: #2c3e50; margin: 15px 0; font-weight: bold;}</style></head><body><h2>⚙️ JIG-8FT-P1 控制面板</h2><div class='welcome-msg'>)rawliteral" 
+  String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>JIG-8FT-P1 總控制台</title><style>body{font-family: Arial, sans-serif; text-align: center; padding: 40px; background-color: #f4f4f9;} .btn {display: block; width: 80%; max-width: 300px; margin: 20px auto; padding: 20px; font-size: 20px; font-weight: bold; color: white; background-color: #0056b3; border: none; border-radius: 10px; cursor: pointer; text-decoration: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px;} .btn:hover {background-color: #004494;} .btn.alt {background-color: #28a745;} .btn.alt:hover {background-color: #218838;} .btn.alt2 {background-color: #f39c12;} .btn.alt2:hover {background-color: #e67e22;} .btn.sd {background-color: #8e44ad;} .btn.sd:hover {background-color: #7d3c98;} .welcome-msg {font-size: 18px; color: #2c3e50; margin: 15px 0; font-weight: bold;}</style></head><body><h2>⚙️ JIG-8FT-P1 控制面板</h2><div class='welcome-msg'>)rawliteral" 
   + welcomeMsg + 
-  R"rawliteral(</div><a href='/wifi' class='btn'>🌐 網路備援設定</a><a href='/monitor' class='btn alt'>⚡ 電壓電流偵測</a><a href='/alarms' class='btn alt2'>⏰ 多工鬧鐘設定</a></body></html>)rawliteral";
+  R"rawliteral(</div><a href='/wifi' class='btn'>🌐 網路備援設定</a><a href='/monitor' class='btn alt'>⚡ 電壓電流偵測</a><a href='/alarms' class='btn alt2'>⏰ 多工鬧鐘設定</a><a href='/sdcard' class='btn sd'>📂 SD卡資料夾</a></body></html>)rawliteral";
   
   server.send(200, "text/html", html);
 }
@@ -748,30 +1177,43 @@ void checkSafetyLimits() {
     if (currentMillis - powerOnTime > 2000) {
         // 檢查電壓
         if (current_V < conf_minVoltage || current_V > conf_maxVoltage) {
-          if (!safetyTripOccurred) {
-            sendToM031_JIG_8CP("PW", "PA8OFF"); 
-            systemWarning = "【電壓超標熔斷】實時電壓 " + String(current_V, 2) + "V 觸及安全邊界！";
-            safetyTripOccurred = true; 
-            if (isRecordingCSV) { csvFile.println("ERROR,電壓超標安全熔斷"); csvFile.close(); isRecordingCSV = false; }
-            stateChanged = true;
-            power_state = "OFF";
-          }
-        }
-        // 檢查電流
-        else if (current_mA > conf_limitScale) {
-          if (overCurrentStartTime == 0) overCurrentStartTime = currentMillis;
-          else if (currentMillis - overCurrentStartTime >= conf_limitDuration * 1000UL) {
+          // --- [V2.1] 修正：只有在有電流時才觸發保護 ---
+          if (current_mA > 0) { // 僅在有實際電流的情況下進行保護檢查
             if (!safetyTripOccurred) {
-              sendToM031_JIG_8CP("PW", "PA8OFF");
-              systemWarning = "【電流超載延時熔斷】電流連續超標！";
+              sendToM031_JIG_8CP("PW", "PA8OFF"); 
+              systemWarning = "【電壓超標熔斷】實時電壓 " + String(current_V, 2) + "V 觸及安全邊界！";
               safetyTripOccurred = true; 
-              if (isRecordingCSV) { csvFile.println("ERROR,電流超載安全熔斷"); csvFile.close(); isRecordingCSV = false; }
-              overCurrentStartTime = 0;
+              if (isRecordingCSV) { csvFile.println("ERROR,電壓超標安全熔斷"); csvFile.close(); isRecordingCSV = false; }
+              overCurrentStartTime = 0; // 清除電流計時器
               stateChanged = true;
               power_state = "OFF"; 
             }
           }
-        } else { overCurrentStartTime = 0; }
+        }
+        // 檢查電流
+        else if (current_mA > conf_limitScale) {
+          // --- [V2.1] 修正：只有在有電流時才觸發保護 ---
+          if (current_mA > 0) { // 僅在有實際電流的情況下進行保護檢查
+            if (overCurrentStartTime == 0) overCurrentStartTime = currentMillis;
+            else if (currentMillis - overCurrentStartTime >= conf_limitDuration * 1000UL) {
+              if (!safetyTripOccurred) {
+                sendToM031_JIG_8CP("PW", "PA8OFF");
+                systemWarning = "【電流超載延時熔斷】電流連續超標！";
+                safetyTripOccurred = true; 
+                if (isRecordingCSV) { csvFile.println("ERROR,電流超載安全熔斷"); csvFile.close(); isRecordingCSV = false; }
+                overCurrentStartTime = 0;
+                stateChanged = true;
+                power_state = "OFF"; 
+              }
+            }
+          } else {
+             // 如果電流不在超標範圍，重置計時器
+             overCurrentStartTime = 0;
+          }
+        } else { 
+          // 如果電流未超標，重置計時器
+          overCurrentStartTime = 0; 
+        }
     }
   }
 
