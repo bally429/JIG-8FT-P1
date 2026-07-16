@@ -80,6 +80,7 @@ float current_V = 0.0;
 String power_state = "OFF";
 
 float conf_maxScale = 500.0;
+float conf_minScale = -50.0; // 🌟 [V2.2 新增] 預設折線圖刻度最小值，支援負值 (例如: -100mA)
 float conf_limitScale = 400.0;
 float conf_minVoltage = 0.0;
 float conf_maxVoltage = 12.0;
@@ -277,6 +278,7 @@ void loadPowerConfig() {
     while (file.available()) {
       String line = file.readStringUntil('\n'); line.trim();
       if (line.startsWith("maxScale=")) conf_maxScale = line.substring(9).toFloat();
+      else if (line.startsWith("minScale=")) conf_minScale = line.substring(9).toFloat(); // 🌟 [V2.2 新增]
       else if (line.startsWith("limitScale=")) conf_limitScale = line.substring(11).toFloat();
       else if (line.startsWith("minVoltage=")) conf_minVoltage = line.substring(11).toFloat();
       else if (line.startsWith("maxVoltage=")) conf_maxVoltage = line.substring(11).toFloat();
@@ -285,9 +287,18 @@ void loadPowerConfig() {
     file.close();
   } else { savePowerConfig(); }
 }
+
 void savePowerConfig() {
   File file = SD.open("/PowerSet/config.txt", FILE_WRITE);
-  if (file) { file.println("maxScale=" + String(conf_maxScale)); file.println("limitScale=" + String(conf_limitScale)); file.println("minVoltage=" + String(conf_minVoltage)); file.println("maxVoltage=" + String(conf_maxVoltage)); file.println("limitDuration=" + String(conf_limitDuration)); file.close(); }
+  if (file) { 
+    file.println("maxScale=" + String(conf_maxScale)); 
+    file.println("minScale=" + String(conf_minScale)); // 🌟 [V2.2 新增]
+    file.println("limitScale=" + String(conf_limitScale)); 
+    file.println("minVoltage=" + String(conf_minVoltage)); 
+    file.println("maxVoltage=" + String(conf_maxVoltage)); 
+    file.println("limitDuration=" + String(conf_limitDuration)); 
+    file.close(); 
+  }
 }
 
 // ==========================================
@@ -720,14 +731,14 @@ void handleSdSaveFile() {
 // ... (其余函数保持不变) ...
 void handleRoot() {
   // 動態判定全域使用者尊稱
-  String welcomeMsg = "歡迎您使用步進馬達讀卡治具控制台！";
+  String welcomeMsg = "歡迎您使用生技治具控制台！";
   if (globalUser != "" && globalUser.length() > 0) {
-    welcomeMsg = "歡迎 「" + globalUser + "」 使用步進馬達讀卡治具控制台！";
+    welcomeMsg = "歡迎 「" + globalUser + "」 使用生技治具控制台！";
   }
 
   String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>JIG-8FT-P1 總控制台</title><style>body{font-family: Arial, sans-serif; text-align: center; padding: 40px; background-color: #f4f4f9;} .btn {display: block; width: 80%; max-width: 300px; margin: 20px auto; padding: 20px; font-size: 20px; font-weight: bold; color: white; background-color: #0056b3; border: none; border-radius: 10px; cursor: pointer; text-decoration: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px;} .btn:hover {background-color: #004494;} .btn.alt {background-color: #28a745;} .btn.alt:hover {background-color: #218838;} .btn.alt2 {background-color: #f39c12;} .btn.alt2:hover {background-color: #e67e22;} .btn.sd {background-color: #8e44ad;} .btn.sd:hover {background-color: #7d3c98;} .welcome-msg {font-size: 18px; color: #2c3e50; margin: 15px 0; font-weight: bold;}</style></head><body><h2>⚙️ JIG-8FT-P1 控制面板</h2><div class='welcome-msg'>)rawliteral" 
   + welcomeMsg + 
-  R"rawliteral(</div><a href='/wifi' class='btn'>🌐 網路備援設定</a><a href='/monitor' class='btn alt'>⚡ 電壓電流偵測</a><a href='/alarms' class='btn alt2'>⏰ 多工鬧鐘設定</a><a href='/sdcard' class='btn sd'>📂 SD卡資料夾</a></body></html>)rawliteral";
+  R"rawliteral(</div><a href='/wifi' class='btn'>🌐 網路備援設定</a><a href='/monitor' class='btn alt'>⚡ 電壓電流設定</a><a href='/alarms' class='btn alt2'>⏰ 多工鬧鐘設定</a><a href='/sdcard' class='btn sd'>📂 SD卡資料夾</a></body></html>)rawliteral";
   
   server.send(200, "text/html", html);
 }
@@ -791,13 +802,14 @@ void handleSaveWiFi() {
 void handleMonitor() {
   String html = R"rawliteral(
   <!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>
-  <title>電壓電流即時分析儀 V1.7.0</title>
+  <title>電壓電流即時分析儀 V2.2</title>
   <style>
     body{font-family: Arial, sans-serif; background: #1e1e1e; color: #fff; margin: 0; padding: 10px; text-align: center;}
     .back-btn{display: block; text-align: left; color: #00c3ff; text-decoration: none; margin-bottom: 10px; font-weight: bold;}
     .dashboard {display: flex; flex-wrap: wrap; justify-content: center; gap: 15px;}
     .panel {background: #2d2d2d; border-radius: 10px; padding: 15px; width: 100%; max-width: 440px; box-sizing:border-box;}
     .val-text {font-size: 32px; font-weight: bold; color: #00ff66; text-shadow: 0 0 10px rgba(0,255,102,0.3);}
+    .panel-chart {background: #2d2d2d; border-radius: 10px; padding: 15px; width: 100%; max-width: 600px; box-sizing:border-box;}
     .integ-box {background:#1a1a1a; border-radius:6px; padding:10px; margin:10px 0; display:flex; justify-content:space-around;}
     .integ-val {font-size:16px; color:#ffcc00; font-weight:bold;}
     .config-grid {display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; text-align: left;}
@@ -808,7 +820,7 @@ void handleMonitor() {
     .btn-rec {background: #ff8800; font-size:16px;} .btn-recording {background: #cc0000; animation: blink 1s infinite;}
     button.power {font-size:18px;}
     .power-off {background: #d9534f;} .power-on {background: #28a745;}
-    canvas {background: #111; border-radius: 5px; margin-top:10px; width: 100%; height: 200px;}
+    canvas {background: #111; border-radius: 5px; margin-top:10px; width: 100%; height: 260px;}
     .modal {display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:#e74c3c; padding:25px; border-radius:10px; z-index:999; width:80%; max-width:350px; box-shadow: 0 0 20px rgba(0,0,0,0.8);}
     .modal-overlay {display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:998;}
     @keyframes blink { 0% {opacity:1;} 50% {opacity:0.5;} 100% {opacity:1;} }
@@ -832,6 +844,7 @@ void handleMonitor() {
 
       <div class="config-grid">
          <div><label>刻度最大值 (mA)</label><input type="number" id="maxScale" value=")rawliteral" + String(conf_maxScale) + R"rawliteral("></div>
+         <div><label>刻度最小值 (mA)</label><input type="number" id="minScale" value=")rawliteral" + String(conf_minScale) + R"rawliteral("></div>
          <div><label>電流警報上限 (mA)</label><input type="number" id="limitScale" value=")rawliteral" + String(conf_limitScale) + R"rawliteral("></div>
          <div><label>容許超載時間 (秒)</label><input type="number" id="dur" value=")rawliteral" + String(conf_limitDuration) + R"rawliteral("></div>
          <div><label>電壓最低限制 (V)</label><input type="number" id="minVol" value=")rawliteral" + String(conf_minVoltage) + R"rawliteral("></div>
@@ -840,11 +853,8 @@ void handleMonitor() {
       <button class="btn-save" onclick="saveConfig()">💾 儲存保護參數至 SD 卡</button>
     </div>
     
-    <div class="panel" style="max-width: 550px;">
+    <div class="panel-chart">
       <canvas id="lineChart"></canvas>
-      <!-- --- [V1.9] 移除獨立的時間軸 Canvas --- -->
-      <!-- <canvas id="timeAxisChart" style="width:100%; height:20px; margin-top: 5px;"></canvas> -->
-      <!-- --- END [V1.9] 移除 --- -->
     </div>
   </div>
 
@@ -858,17 +868,13 @@ void handleMonitor() {
   <script>
     const cvs = document.getElementById('lineChart');
     const ctx = cvs.getContext('2d');
-    // --- [V1.9] 移除獨立的時間軸 Canvas 和 Context ---
-    // const timeAxisCvs = document.getElementById('timeAxisChart');
-    // const timeAxisCtx = timeAxisCvs.getContext('2d');
-    // --- END [V1.9] 移除 ---
     const maxPoints = 200;   
     let historyData = new Array(maxPoints).fill(0); 
     let ws;
     let localRecording = false;
     let localFilename = "";
     let JS_PowerState = "OFF";
-    let lastDisplayedWarning = ""; // 🌟 [新增] 用來記住最後一次彈出的警告
+    let lastDisplayedWarning = ""; 
 
     function initWebSocket() {
       ws = new WebSocket('ws://' + window.location.hostname + ':81/');
@@ -910,16 +916,15 @@ void handleMonitor() {
         localRecording = false;
       }
 
-// 🌟 [替換此區塊] 加入防止連續彈窗邏輯
       if (data.warning !== "") {
         if (data.warning !== lastDisplayedWarning) {
            document.getElementById("warnMsg").innerText = data.warning;
            document.getElementById("warnModal").style.display = "block";
            document.getElementById("modalOverlay").style.display = "block";
-           lastDisplayedWarning = data.warning; // 記住這次的警告，不重複彈出
+           lastDisplayedWarning = data.warning; 
         }
       } else {
-        lastDisplayedWarning = ""; // 若 ESP32 端已清空警告 (例如重新開啟電源)，則重置紀錄
+        lastDisplayedWarning = ""; 
       }
 
       historyData.push(data.power === "ON" ? data.mA : 0);
@@ -939,58 +944,57 @@ void handleMonitor() {
       }
     }
 
-    // --- [V1.9] 修正 drawChart 函數 ---
     function drawChart() {
       cvs.width = cvs.clientWidth; 
       cvs.height = cvs.clientHeight;
       const w = cvs.width, h = cvs.clientHeight;
       ctx.clearRect(0, 0, w, h);
 
-      // --- 繪製主圖 ---
+      // 🌟 [V2.2 重要重構] 取得最大值與最小值
       const maxScale = parseFloat(document.getElementById('maxScale').value) || 500;
+      const minScale = parseFloat(document.getElementById('minScale').value) || 0;
       const limitVal = parseFloat(document.getElementById('limitScale').value) || 400;
+      const range = maxScale - minScale; // 刻度全區間
 
+      // 繪製背景網格與動態 Y 軸刻度
       ctx.strokeStyle = '#383838'; ctx.fillStyle = '#888'; ctx.font = '10px Arial';
       ctx.beginPath();
       for(let i=0; i<=5; i++) {
-        let y = Math.floor(i * (h/5)); ctx.moveTo(0, y); ctx.lineTo(w, y);
-        ctx.fillText((maxScale - i * (maxScale/5)).toFixed(0), 5, y + 12);
+        let y = Math.floor(i * (h/5)); 
+        ctx.moveTo(0, y); ctx.lineTo(w, y);
+        // 動態計算每一格的數值
+        let gridVal = maxScale - (i * (range / 5));
+        ctx.fillText(gridVal.toFixed(0), 5, y + 12);
       }
       for(let i=0; i<=10; i++) { let x = Math.floor(i * (w/10)); ctx.moveTo(x, 0); ctx.lineTo(x, h); }
       ctx.stroke();
 
-      const limitY = h - (limitVal / maxScale) * h;
+      // 🌟 [V2.2 修正] 繪製過流保護限制紅虛線位置公式
+      const limitY = h - ((limitVal - minScale) / range) * h;
       if (limitY > 0 && limitY < h) {
         ctx.beginPath(); ctx.setLineDash([5, 5]); ctx.moveTo(0, limitY); ctx.lineTo(w, limitY);
         ctx.strokeStyle = '#ff3333'; ctx.stroke(); ctx.setLineDash([]);
       }
 
+      // 🌟 [V2.2 修正] 數據點繪製公式
       ctx.beginPath(); ctx.strokeStyle = '#00ff66'; ctx.lineWidth = 2;
       const xStep = w / (maxPoints - 1);
       for(let i=0; i<historyData.length; i++) {
-        let x = i * xStep; let y = h - (historyData[i] / maxScale) * h;
+        let x = i * xStep; 
+        // 帶入公式，精確處理包含負值的像素 Y 軸映射
+        let y = h - ((historyData[i] - minScale) / range) * h;
         if(i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
 
-      // --- 繪製時間軸 (直接畫在 lineChart 的底部) ---
-      // 1. 畫一條 X 軸線 (在主圖底部)
-      const axisY = h - 10; // 軸線位置：距離底部 10px
-      ctx.beginPath();
-      ctx.moveTo(0, axisY);
-      ctx.lineTo(w, axisY);
-      ctx.strokeStyle = '#aaa';
-      ctx.stroke();
+      // 繪製時間軸
+      const axisY = h - 10; 
+      ctx.beginPath(); ctx.moveTo(0, axisY); ctx.lineTo(w, axisY);
+      ctx.strokeStyle = '#aaa'; ctx.stroke();
 
-      // 2. 畫垂直刻度線
-      ctx.strokeStyle = '#555';
-      ctx.lineWidth = 1;
-
-      // 核心：每一個資料點對應 20ms (因為 ESP32 是 20ms broadcast)
-      const MS_PER_POINT = 20; // ← [V1.9] 與 ESP32 的 broadcast 頻率一致
-
-      // 我們希望每 N 個點畫一條刻度線，讓刻度不要太密
-      const GRID_POINTS = 5; // 每 5 個資料點畫一條線 (即每 100ms 一條線)
+      ctx.strokeStyle = '#555'; ctx.lineWidth = 1;
+      const MS_PER_POINT = 20; 
+      const GRID_POINTS = 5; 
       const totalGrids = Math.floor(historyData.length / GRID_POINTS);
 
       for(let i = 0; i <= totalGrids; i++) {
@@ -998,24 +1002,14 @@ void handleMonitor() {
         if (pointIndex < historyData.length) {
           let x = pointIndex * xStep;
           if (x <= w) {
-            ctx.beginPath();
-            ctx.moveTo(x, axisY);
-            ctx.lineTo(x, axisY + 10); // 向下畫 10px 的刻度線
-            ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x, axisY); ctx.lineTo(x, axisY + 10); ctx.stroke();
           }
         }
       }
 
-      // 3. 在右下角標註單位
-      ctx.fillStyle = '#aaa';
-      ctx.font = '12px Arial';
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = '#aaa'; ctx.font = '12px Arial'; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
       ctx.fillText(MS_PER_POINT * GRID_POINTS + ' ms/格', w - 5, h - 5);
-
-      // --- END 繪製時間軸 ---
     }
-    // --- END [V1.9] 修正 drawChart 函數 ---
 
     function togglePower() {
       const newState = (JS_PowerState === "OFF") ? "ON" : "OFF";
@@ -1024,9 +1018,14 @@ void handleMonitor() {
     }
 
     function saveConfig() {
+      // 🌟 [V2.2 新增] 打包 minScale 引數送回伺服器
       const params = new URLSearchParams({
-        maxScale: document.getElementById('maxScale').value, limitScale: document.getElementById('limitScale').value,
-        minVol: document.getElementById('minVol').value, maxVol: document.getElementById('maxVol').value, dur: document.getElementById('dur').value
+        maxScale: document.getElementById('maxScale').value, 
+        minScale: document.getElementById('minScale').value, 
+        limitScale: document.getElementById('limitScale').value,
+        minVol: document.getElementById('minVol').value, 
+        maxVol: document.getElementById('maxVol').value, 
+        dur: document.getElementById('dur').value
       });
       fetch('/api/saveConfig', { method: 'POST', body: params }).then(() => alert("💾 安全配置已寫入 SD 卡保存！"));
     }
@@ -1037,6 +1036,7 @@ void handleMonitor() {
   )rawliteral";
   server.send(200, "text/html", html);
 }
+
 void handleApiData() {
   String json = "{\"mA\":" + String(current_mA) + ",\"v\":" + String(current_V) + ",\"power\":\"" + power_state + "\",\"warning\":\"" + systemWarning + "\",\"mAh\":" + String(cumulative_mAh, 4) + ",\"mWh\":" + String(cumulative_mWh, 4) + ",\"logging\":" + (isRecordingCSV ? "true" : "false") + "}";
   server.send(200, "application/json", json);
@@ -1060,6 +1060,7 @@ void handleApiPower() {
 
 void handleApiSaveConfig() {
   if (server.hasArg("maxScale")) conf_maxScale = server.arg("maxScale").toFloat();
+  if (server.hasArg("minScale")) conf_minScale = server.arg("minScale").toFloat(); // 🌟 [V2.2 新增]
   if (server.hasArg("limitScale")) conf_limitScale = server.arg("limitScale").toFloat();
   if (server.hasArg("minVol")) conf_minVoltage = server.arg("minVol").toFloat();
   if (server.hasArg("maxVol")) conf_maxVoltage = server.arg("maxVol").toFloat();
@@ -1067,7 +1068,7 @@ void handleApiSaveConfig() {
   
   savePowerConfig(); // 儲存至 ESP32 本端 SD 卡
   
-  sendConfigToM031(); // 【新增：即時同步】主動發送下發 [CF] 封包給 M031 更新硬體熔斷保護臨界值
+  sendConfigToM031(); // 即時同步：主動發送下發 [CF] 封包給 M031 更新硬體熔斷保護臨界值
   
   server.send(200, "text/plain", "OK");
 }

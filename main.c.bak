@@ -1435,10 +1435,36 @@ int main(void) {
     HID_Init(); NVIC_EnableIRQ(USBD_IRQn); USBD_Start();
     OLED_Force_Reset(); vOLED_INIT(); vINA237_Init(); set237Calibration_1A(); RV3028_Init();
     
-    UI_Clear(); Safe_Print_OLED(0, "System Ready"); Safe_Print_OLED(16, "JIG-8FT-P1 OK"); Safe_Print_OLED(32, "--- BALLY ---"); UI_Update();
+    // 繪製新的按鍵提示啟動畫面
+    UI_Clear(); 
+    Safe_Print_OLED(0, "JIG-8FT-P1 (%s) --BALLY--", FIRMWARE_VERSION); 
+    Safe_Print_OLED(16, "   |===============Blue: Down"); 
+    Safe_Print_OLED(32, "   |    |=========Green: Up"); 
+    Safe_Print_OLED(48, "   |    |    |====Yellow: Next"); 
+    UI_Update();
 
-    JigBeep(500); Delay_ms(100); JigBeep(500); Delay_ms(1000);
+    JigBeep(500); Delay_ms(100); JigBeep(500); 
+
+    // 取代 Delay_ms(1000)，改為卡在這邊等待「黃色鍵 (PF5)」按下
+    while(1) {
+        Global_Background_Tasks(); // 保持背景 USB/UART 通訊正常運作
+        
+        if ((PF->PIN & BIT5) == 0) { // 偵測黃色鍵 (PF5) 是否按下
+            Delay_ms(50); // 防彈跳 (Debounce)
+            if ((PF->PIN & BIT5) == 0) {
+                JigBeep(200); // 發出短逼聲確認已按下
+                // 等待使用者放開按鍵
+                while ((PF->PIN & BIT5) == 0) { 
+                    Global_Background_Tasks();
+                    Delay_ms(10); 
+                }
+                break; // 按鍵放開後，打破迴圈進入下一個畫面
+            }
+        }
+        Delay_ms(15);
+    }
     
+
     JIG_8CP_Send_Packet("AL", "?");
     const char *menu_items[] = { "Power Monitor", "RS232 Monitor", "Wiegand", "TK2", "Time Set", "Buzzer Settings", "USBHID SET", "UART1 JIG_8CP" };
     const int NUM_ITEMS = sizeof(menu_items) / sizeof(menu_items[0]); 
