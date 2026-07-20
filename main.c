@@ -1,29 +1,33 @@
 /*
  * ===========================================================================================
- * Project: JIG-8FT-P1 _WIFIBLE (M031 ºİ¥Dµ{¦¡)
+ * Project: JIG-8FT-P1 _WIFIBLE (M031 ç«¯ä¸»ç¨‹å¼)
  * MCU: Nuvoton M032SE3AE
  * OLED: 3.2inch 256x64 mono white OLED Module (SSD1322)
  * RTC: RV-3028-C7
  * PowerMonitor: INA237 I2C Interface
- * * [ª©¥»¼i¾ú]
- * V5.3.0 (2026/06/30): ¤Ş¤J TMR1 1ms ­I´º¥ô°È¡B¥ş°ì UART1 SC µL·PÂàµo¡B¦h¤u¾xÄÁ»P½Xªí¡C
- * V5.3.1 (2026/06/30): ¸É¦^¿òº|ªº UI Ã¸¹Ï»P»öªíªO§ó·s¨ç¦¡¡A­×´_½sÄ¶¿ù»~¡C
- * V5.3.3 (2026/06/30): [­«¤j¬[ºc¤É¯Å] USB HID ¥ş­±§ï¬°¡u«D¦P¨B¦î¦C (Ring Buffer) ­I´ºµo°e¡v¡C
- * V5.3.6 (2026/07/02): [¬[ºc¸Ñ½¢] ¤Ş¤J VRAM µêÀÀÅã¦s¤ŞÀº¡A±N vsnprintf ¹Bºâ»P OLED µwÅé¹ı©³¤ÀÂ÷¡C
- * V5.3.8 (2026/07/07): [³q°T»PÀx¦s] ­×¥¿ WIFI CMD ¿òº| ¤Î ·s¼W FIRMWARE_VERSION ²Î¤@ºŞ²z¡C
- * V5.3.9 (2026/07/08): [¹q·½ª¬ºA¥ş°ì¦P¨B] ¸Ñ¨M WEB µo°e PWON ®É¡AOLED µe­±»P¹q¬y¥­§¡­ÈµLªk¦P¨B§ó·s°İÃD¡C
- * V5.3.10 (2026/07/08): [UI Bug ­×´_] ­×´_ Alarm_Menu_Loop ¤¤»~¥ÎµwÅé OLED_Clear ¾É­P VRAM ·¸º¡»Pµe­±¶Â«Ì°İÃD¡C
- * V5.3.11 (2026/07/08): [³q°T¤É¯Å»P¦w¥ş¾÷¨î] ±µ¦¬ Config ¹qÀ£/¹q¬y¤W¤U­­¡A¹ê§@¥ş°ì¦w¥şÂ_¹q¾÷¨î¡C
- * V5.3.12 (2026/07/09): [¨t²ÎÃ­©w©Ê©wª©] ¥ş­±²Î¾ã¹êÅé«ö¶s»P WEB µêÀÀ«ö¶sªººX¼Ğ¥æ´¤¡C
- * V5.3.13 (2026/07/13): [­p®É»P¦P¨BÀu¤Æ] ºë½T±±¨îµo°e®É§Ç¡A±Ò¥Î UART0 §@¬° Debug ¿é¥X¡C
- * V5.3.14 (2026/07/14): [°£¿ù»PÃ­©w©ÊÀu¤Æ] ¥[¤J´`Àô®É¶¡ºÊ±±»P§óºë²Óªº Debug °T®§¡C
- * V5.3.15 (2026/07/15): [º²Â_Äµ¥Ü§¹¬ü­×´_] ¸Éµo³Ì«á¤@µ§²§±` PD «Ê¥]¡A½T«O WEB Äµ¥Üµøµ¡ 100% ¼u¥X¡C
- * V5.3.16 (2026/07/15): [°£¿ù¶}Ãö»P¹q·½ª¬ºA­×¥¿] ·s¼W¥ş°ìÅÜ¼Æ g_u8DebugEnable ±±¨î Debug ¿é¥X¡C
- * V5.3.17 (2026/07/16): [³æ¾÷¼Ò¦¡Àu¤Æ»P¨ó©w°£¿ù]
- * 1. ¥ş­±²¾°£¥ş°ìÅÜ¼Æ g_u8DebugEnable¡BDEBUG_PRINTF ¨ç¦¡¤Î©Ò¦³°£¿ù¥N½X¡C
- * 2. ¹ê§@³æ¾÷¹jÂ÷¼Ò¦¡­­¨î (g_u8StandaloneMode)¡A©ó RS232¡BWiegand¡BTK2 ¤¶­±¤U¹ı©³«Ì½ª¦V UART1 ¥á°e±±¨î«Ê¥]¡A«O¯d¥¿±` ESP32 ¸ê®ÆÂàµo¡C
- * 3. ­×¥¿ Wiegand/TK2/RS232 ±Ä¼Ë­p®É¶Ç¤J loop_tick ªº­P©R Bug¡A¥ş­±¦^ÂkµwÅéµ´¹ï®ÉÄÁ g_u32SystemMs¡C
- * 4. ¾É¤J¡u¥]§ÀÂ_°T¹O®É§P©wªk¡v¡A¸Ñ¨M RS232 ¼Ò¦¡Åª¥d®É«e¸m½X 0x02 (Åã¥Ü¬° '.') ¾D¨ì°j°é°ªÀW­«¸mÂĞ»\ªº­«¤j¯Ê³´¡C
+ * * [ç‰ˆæœ¬å±¥æ­·]
+ * V5.3.0 (2026/06/30): å¼•å…¥ TMR1 1ms èƒŒæ™¯ä»»å‹™ã€å…¨åŸŸ UART1 SC ç„¡æ„Ÿè½‰ç™¼ã€å¤šå·¥é¬§é˜èˆ‡ç¢¼è¡¨ã€‚
+ * V5.3.1 (2026/06/30): è£œå›éºæ¼çš„ UI ç¹ªåœ–èˆ‡å„€è¡¨æ¿æ›´æ–°å‡½å¼ï¼Œä¿®å¾©ç·¨è­¯éŒ¯èª¤ã€‚
+ * V5.3.3 (2026/06/30): [é‡å¤§æ¶æ§‹å‡ç´š] USB HID å…¨é¢æ”¹ç‚ºã€ŒéåŒæ­¥ä½‡åˆ— (Ring Buffer) èƒŒæ™¯ç™¼é€ã€ã€‚
+ * V5.3.6 (2026/07/02): [æ¶æ§‹è§£è€¦] å¼•å…¥ VRAM è™›æ“¬é¡¯å­˜å¼•æ“ï¼Œå°‡ vsnprintf é‹ç®—èˆ‡ OLED ç¡¬é«”å¾¹åº•åˆ†é›¢ã€‚
+ * V5.3.8 (2026/07/07): [é€šè¨Šèˆ‡å„²å­˜] ä¿®æ­£ WIFI CMD éºæ¼ åŠ æ–°å¢ FIRMWARE_VERSION çµ±ä¸€ç®¡ç†ã€‚
+ * V5.3.9 (2026/07/08): [é›»æºç‹€æ…‹å…¨åŸŸåŒæ­¥] è§£æ±º WEB ç™¼é€ PWON æ™‚ï¼ŒOLED ç•«é¢èˆ‡é›»æµå¹³å‡å€¼ç„¡æ³•åŒæ­¥æ›´æ–°å•é¡Œã€‚
+ * V5.3.10 (2026/07/08): [UI Bug ä¿®å¾©] ä¿®å¾© Alarm_Menu_Loop ä¸­èª¤ç”¨ç¡¬é«” OLED_Clear å°è‡´ VRAM æº¢æ»¿èˆ‡ç•«é¢é»‘å±å•é¡Œã€‚
+ * V5.3.11 (2026/07/08): [é€šè¨Šå‡ç´šèˆ‡å®‰å…¨æ©Ÿåˆ¶] æ¥æ”¶ Config é›»å£“/é›»æµä¸Šä¸‹é™ï¼Œå¯¦ä½œå…¨åŸŸå®‰å…¨æ–·é›»æ©Ÿåˆ¶ã€‚
+ * V5.3.12 (2026/07/09): [ç³»çµ±ç©©å®šæ€§å®šç‰ˆ] å…¨é¢çµ±æ•´å¯¦é«”æŒ‰éˆ•èˆ‡ WEB è™›æ“¬æŒ‰éˆ•çš„æ——æ¨™äº¤æ¡ã€‚
+ * V5.3.13 (2026/07/13): [è¨ˆæ™‚èˆ‡åŒæ­¥å„ªåŒ–] ç²¾ç¢ºæ§åˆ¶ç™¼é€æ™‚åºï¼Œå•Ÿç”¨ UART0 ä½œç‚º Debug è¼¸å‡ºã€‚
+ * V5.3.14 (2026/07/14): [é™¤éŒ¯èˆ‡ç©©å®šæ€§å„ªåŒ–] åŠ å…¥å¾ªç’°æ™‚é–“ç›£æ§èˆ‡æ›´ç²¾ç´°çš„ Debug è¨Šæ¯ã€‚
+ * V5.3.15 (2026/07/15): [ç†”æ–·è­¦ç¤ºå®Œç¾ä¿®å¾©] è£œç™¼æœ€å¾Œä¸€ç­†ç•°å¸¸ PD å°åŒ…ï¼Œç¢ºä¿ WEB è­¦ç¤ºè¦–çª— 100% å½ˆå‡ºã€‚
+ * V5.3.16 (2026/07/15): [é™¤éŒ¯é–‹é—œèˆ‡é›»æºç‹€æ…‹ä¿®æ­£] æ–°å¢å…¨åŸŸè®Šæ•¸ g_u8DebugEnable æ§åˆ¶ Debug è¼¸å‡ºã€‚
+ * V5.3.17 (2026/07/16): [å–®æ©Ÿæ¨¡å¼å„ªåŒ–èˆ‡å”å®šé™¤éŒ¯]
+ * V5.3.18 (2026/07/17): [æ¶æ§‹é‡æ§‹-é›»æºæƒ…å¢ƒéš”é›¢] ç§»é™¤å…¨åŸŸ g_u8StandaloneMode / å…¨åŸŸä¿è­·é–€æª»ï¼Œ
+ *   æ”¹ç”¨æ¯å€‹ä»‹é¢å„è‡ªæŒæœ‰çš„ PowerCtxï¼ˆé›»æºæƒ…å¢ƒï¼‰çµæ§‹ï¼Œæœçµ•ã€ŒåŒé¡å‹å°±å…±ç”¨å…¨åŸŸã€é€ æˆçš„æ´©æ¼ï¼š
+ *     1. Wiegand / TK2 / RS232 / Power Monitor å››å€‹ä»‹é¢å„è‡ªæ“æœ‰ç¨ç«‹çš„é›»æºç‹€æ…‹èˆ‡ä¿è­·é–€æª»ï¼Œ
+ *        ä¸å†å…±ç”¨ g_power_state / g_cfg_* / g_web_power_toggle_req çš„éš±æ€§è€¦åˆã€‚
+ *     2. CF(è¨­å®šé–€æª») èˆ‡ PW(WEBé›»æºè«‹æ±‚) å…©æŒ‡ä»¤åªåœ¨ã€Œç›®å‰è¨»å†Šç‚º Networked æƒ…å¢ƒã€æ™‚æ‰æœƒè¢«æ¡ç´ï¼Œ
+ *        é›¢é–‹ Power Monitor å¾Œè©²æƒ…å¢ƒç‰©ä»¶å³éš¨å †ç–ŠéŠ·æ¯€ï¼Œä¸æœƒæœ‰æ®˜ç•™è¨­å®šæ›åœ¨å…¶ä»–ä»‹é¢ä¸Šã€‚
+ *     3. ä¿®æ­£ Wiegand/TK2 å‘¼å« Process_Background_Sampling èª¤å‚³ loop_tick(ç›¸å°è¨ˆæ•¸) è€Œé
+ *        g_u32SystemMs(çµ•å°ç¡¬é«”æ™‚é˜) çš„è¶…è¼‰è¨ˆæ™‚å¤±æº–å•é¡Œã€‚
  * ===========================================================================================
  */
 
@@ -37,12 +41,12 @@
 #include "RV3028.h"
 
 // =======================================================
-// [¨t²Îª©¥»±±¨î]
+// [ç³»çµ±ç‰ˆæœ¬æ§åˆ¶]
 // =======================================================
-#define FIRMWARE_VERSION "V5.3.17"
+#define FIRMWARE_VERSION "V5.3.18"
 
 // =======================================================
-// [¨t²Î¥ş°ì³]©w»PÅÜ¼Æ]
+// [ç³»çµ±å…¨åŸŸè¨­å®šèˆ‡è®Šæ•¸]
 // =======================================================
 volatile uint8_t g_u8BuzzerEnabled = 0; 
 volatile uint8_t g_u8EP2Ready = 0;
@@ -50,42 +54,87 @@ extern volatile uint8_t g_u8Led_Status[8];
 volatile uint8_t g_u8UsbHidAppendCR = 1; 
 volatile uint8_t g_u8UsbHidSmartCaps = 1; 
 
-// --- [V5.3.17 ·s¼W] ³æ¾÷¿ï³æ¼Ò¦¡ºX¼Ğ (1:¹jÂ÷ UART1 ¿é¥X, 0:¥¿±`¦êÁp³q°T) ---
-volatile uint8_t g_u8StandaloneMode = 0;
-
-// TMR1 µwÅé¨t²Î­p®É (1ms) »P­I´ºª¬ºA±±¨î
+// TMR1 ç¡¬é«”ç³»çµ±è¨ˆæ™‚ (1ms) èˆ‡èƒŒæ™¯ç‹€æ…‹æ§åˆ¶
 volatile uint32_t g_u32SystemMs = 0;
 volatile uint32_t g_u32StopwatchMs = 0;
 volatile uint8_t g_u8StopwatchRunning = 0;
 volatile uint8_t g_force_alarm_menu = 0; 
 
 // =======================================================
-// [WIFI »P³q°T¡B¹q·½ª¬ºAÅÜ¼Æ]
+// [WIFI èˆ‡é€šè¨Šè®Šæ•¸]
 // =======================================================
 char g_szWifiIP[20] = "";
 uint8_t g_u8WifiConnected = 0;
 
-volatile int g_power_state = 0;          // °O¿ı·í«eª«²z¹q·½¯u¹êª¬ºA
-volatile int g_web_power_toggle_req = 0; // ºô­¶ºİµo¨Óªº¹q·½±±¨î½Ğ¨D (0:µL, 1:­n¨DON, 2:­n¨DOFF)
+// g_power_stateï¼šåƒ…ä½œç‚ºã€ŒWEB/å„€è¡¨æ¿å¯è¦‹çš„é¡åƒã€ï¼Œåªæœ‰ Networked æƒ…å¢ƒçš„è¿´åœˆæœƒåŒæ­¥å¯«å…¥å®ƒï¼Œ
+// ç´”ç²¹ä¾› JIG_8CP_Command_Handler çš„ PW "?" æŸ¥è©¢èˆ‡å¤–éƒ¨é¡¯ç¤ºä½¿ç”¨ï¼Œä¸å†é©…å‹•ä»»ä½•ä¿è­·é‚è¼¯ã€‚
+volatile int g_power_state = 0;
 
 // =======================================================
-// [¹q·½«OÅ@¾÷¨î³]©w (±q SD ¥d CF «ü¥OÅª¨ú)]
+// [V5.3.18 æ–°æ¶æ§‹] é›»æºæƒ…å¢ƒ (PowerCtx) â€” å–ä»£å…¨åŸŸ g_u8StandaloneMode + g_cfg_* + g_web_power_toggle_req
 // =======================================================
-float g_cfg_scale_max = 500.0f;
-float g_cfg_current_max = 400.0f;
-float g_cfg_voltage_min = 0.0f;
-float g_cfg_voltage_max = 12.0f;
-uint8_t g_cfg_overload_sec = 3;
-uint8_t g_config_received = 0;
+typedef enum {
+    PWR_SCOPE_NETWORKED = 0,  // Power Monitorï¼šå…è¨± WEB è™›æ“¬é›»æºéµã€å…è¨± WEB(CF) è¨­å®šä¿è­·é–€æª»
+    PWR_SCOPE_ISOLATED  = 1   // RS232 / Wiegand / TK2ï¼šåƒ…å¯¦é«”æŒ‰éµæ§åˆ¶ã€ä¿è­·é–€æª»ç‚ºç¨ç«‹ç¡¬ç·¨ç¢¼é è¨­å€¼
+} PowerScope;
 
-uint32_t g_overload_start_tick = 0; // ¬ö¿ı¹q¬y¶W¸ü°_©l®É¶¡
-uint8_t  g_is_overloading = 0;      // ¼Ğ°O¬O§_¥¿¦b¶W¸ü­p®É¤¤
+typedef struct {
+    PowerScope scope;
+    int      power_state;
 
-float Process_Background_Sampling(volatile int *power_state, uint32_t current_time_ms);
-void Trigger_Power_Protection(volatile int *power_state, const char* reason, float final_c, float final_v);
+    // ä¿è­·é–€æª»ï¼ˆæ¯å€‹æƒ…å¢ƒå„è‡ªç¨ç«‹æŒæœ‰ï¼Œä¸å†å…±ç”¨åŒä¸€ä»½å…¨åŸŸï¼‰
+    uint8_t  config_received;   // æ˜¯å¦å·²æœ‰æœ‰æ•ˆé–€æª»ï¼ˆNetworked æƒ…å¢ƒæ‰å¯èƒ½ç”± WEB CF æŒ‡ä»¤å¡«å…¥ï¼‰
+    float    voltage_min;
+    float    voltage_max;
+    float    current_max;
+    uint8_t  overload_sec;
+
+    // ä¿è­·åŸ·è¡ŒæœŸç‹€æ…‹
+    uint8_t  is_overloading;
+    uint32_t overload_start_tick;
+} PowerCtx;
+
+// ç›®å‰ã€Œå”¯ä¸€ã€è¢«å…è¨±æ¥æ”¶ WEB CF / PW æŒ‡ä»¤çš„æƒ…å¢ƒã€‚
+// åªæœ‰ Power_Monitor_Loop åœ¨é€²å…¥æ™‚æœƒæŠŠè‡ªå·±çš„ä½å€è¨»å†Šåˆ°é€™è£¡ï¼Œé›¢é–‹æ™‚æ¸…ç©ºã€‚
+// Wiegand / TK2 / RS232 å¾æœªè¨»å†Šï¼Œå› æ­¤ WEB ç«¯ç„¡è«–é€ä»€éº¼ CF/PWï¼Œéƒ½ä¸æœƒå½±éŸ¿å®ƒå€‘ â€”
+// é€™æ˜¯å–ä»£ã€Œå¿˜è¨˜åœ¨æ¯å€‹å‡½å¼æ‰‹å‹•æ¸… g_u8StandaloneModeã€é€™ç¨®è„†å¼±å¯«æ³•çš„æ ¹æœ¬è§£æ³•ã€‚
+static volatile PowerCtx *g_pActiveNetworkedCtx = NULL;
+
+// Isolated æƒ…å¢ƒçš„ç¡¬ç·¨ç¢¼å®‰å…¨é è¨­å€¼ï¼ˆä¸æ¥å— WEB å‹•æ…‹èª¿æ•´ï¼Œé¿å…èˆ‡ Power Monitor çš„é–€æª»äº’ç›¸æ±¡æŸ“ï¼‰
+#define ISOLATED_DEFAULT_VOLTAGE_MIN   0.0f
+#define ISOLATED_DEFAULT_VOLTAGE_MAX   12.0f
+#define ISOLATED_DEFAULT_CURRENT_MAX   400.0f
+#define ISOLATED_DEFAULT_OVERLOAD_SEC  3
+
+static void PowerCtx_Init(PowerCtx *ctx, PowerScope scope) {
+    memset(ctx, 0, sizeof(PowerCtx));
+    ctx->scope = scope;
+    ctx->power_state = 0;
+    if (scope == PWR_SCOPE_ISOLATED) {
+        // Isolated æƒ…å¢ƒä¸€å¾‹ä½¿ç”¨ç¨ç«‹ç¡¬ç·¨ç¢¼é–€æª»ï¼Œä¸”è¦–ç‚ºã€Œå·²å°±ç·’ã€ä»¥ç¶­æŒåŸºæœ¬ç¡¬é«”ä¿è­·ï¼Œ
+        // ä½†é€™ä»½è¨­å®šèˆ‡ Networked æƒ…å¢ƒçš„ g_cfg_* å®Œå…¨ç„¡é—œï¼ŒWEB ç«¯ç„¡æ³•è¦†å¯«ã€‚
+        ctx->config_received = 1;
+        ctx->voltage_min  = ISOLATED_DEFAULT_VOLTAGE_MIN;
+        ctx->voltage_max  = ISOLATED_DEFAULT_VOLTAGE_MAX;
+        ctx->current_max  = ISOLATED_DEFAULT_CURRENT_MAX;
+        ctx->overload_sec = ISOLATED_DEFAULT_OVERLOAD_SEC;
+    } else {
+        // Networked æƒ…å¢ƒé–€æª»é è¨­ã€Œå°šæœªå°±ç·’ã€ï¼Œç­‰å¾… WEB ç«¯ CF æŒ‡ä»¤é€é”æ‰å•Ÿå‹•ä¿è­·ï¼Œ
+        // èˆ‡èˆŠç‰ˆè¡Œç‚ºä¸€è‡´ï¼ˆg_config_received èµ·å§‹ç‚º 0ï¼‰ã€‚
+        ctx->config_received = 0;
+        ctx->voltage_min  = 0.0f;
+        ctx->voltage_max  = 12.0f;
+        ctx->current_max  = 400.0f;
+        ctx->overload_sec = 3;
+    }
+}
+
+void Trigger_Power_Protection(PowerCtx *ctx, const char* reason, float final_c, float final_v);
+float Process_Background_Sampling(PowerCtx *ctx, uint32_t current_time_ms);
+int  Check_Power_Toggle(PowerCtx *ctx);
 
 // =======================================================
-// [V5.3.3] USB HID ±M¥Î«D¦P¨Bµo°e½w½Ä°Ï (Ring Buffer)
+// [V5.3.3] USB HID å°ˆç”¨éåŒæ­¥ç™¼é€ç·©è¡å€ (Ring Buffer)
 // =======================================================
 #define HID_TX_BUF_SIZE 256
 volatile uint8_t g_hid_tx_buf[HID_TX_BUF_SIZE];
@@ -93,7 +142,7 @@ volatile uint16_t g_hid_head = 0;
 volatile uint16_t g_hid_tail = 0;
 
 // =======================================================
-// [UART Ring Buffer ³]©w]
+// [UART Ring Buffer è¨­å®š]
 // =======================================================
 #define UART1_RX_BUF_SIZE 256
 volatile uint8_t g_u1_rx_buf[UART1_RX_BUF_SIZE];
@@ -109,7 +158,7 @@ volatile uint16_t g_u2_rx_tail = 0;
 #define JIG_8CP_CR  0x0D
 
 // =======================================================
-// [¾xÄÁµ²ºc³]©w]
+// [é¬§é˜çµæ§‹è¨­å®š]
 // =======================================================
 typedef struct {
     uint8_t hours;
@@ -121,7 +170,7 @@ AlarmDef g_alarms[6] = {0};
 volatile uint8_t g_alarm_triggered = 0;
 
 // =======================================================
-// [¥~³¡¨ç¼Æ»P¦@¥Î¼Ò²Õ«Å§i]
+// [å¤–éƒ¨å‡½æ•¸èˆ‡å…±ç”¨æ¨¡çµ„å®£å‘Š]
 // =======================================================
 extern const S_USBD_INFO_T gsInfo;
 extern void HID_ClassRequest(void);
@@ -139,7 +188,7 @@ extern float getCurrent_mA(void);
 extern float getPower_mW(void);
 
 // =======================================================
-// [©Ò¦³¨ç¼Æ­ì«¬«Å§i - Prototypes] 
+// [æ‰€æœ‰å‡½æ•¸åŸå‹å®£å‘Š - Prototypes] 
 // =======================================================
 void Process_UART1_JIG_8CP_Parser(void);
 void Delay_ms(uint32_t ms);
@@ -167,7 +216,7 @@ void USBHID_Process_Queue(void);
 void Internal_Send_Char_HID(char c);
 
 // =======================================================
-// [°ªÀW¹q¬y·Æ°Ê¥­§¡Âoªi¾¹»P®p­È°lÂÜ]
+// [é«˜é »é›»æµæ»‘å‹•å¹³å‡æ¿¾æ³¢å™¨èˆ‡å³°å€¼è¿½è¹¤]
 // =======================================================
 #define CURRENT_FILTER_SIZE 50 
 float g_fCurrentBuffer[CURRENT_FILTER_SIZE] = {0};
@@ -195,7 +244,7 @@ void Reset_Current_Filter(void) {
 }
 
 // =======================================================
-// [®Ö¤ß«öÁä»P¦@¥Î UI ¼Ò²Õ]
+// [æ ¸å¿ƒæŒ‰éµèˆ‡å…±ç”¨ UI æ¨¡çµ„]
 // =======================================================
 int Check_Exit_Button(void) {
     if((PF->PIN & BIT5) == 0) { Delay_ms(50); if((PF->PIN & BIT5) == 0) { JigBeep(200); while((PF->PIN & BIT5)==0){} return 1; } } return 0;
@@ -204,80 +253,82 @@ int Check_Reset_Button(void) {
     if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { JigBeep(50); g_fMaxCurrent = 0.0f; g_fMinCurrent = 9999.0f; while((PF->PIN & BIT3)==0){} return 1; } } return 0;
 }
 
-int Check_Power_Toggle(int *power_state) {
-    // 1. °»´ú¹êÅé Red «ö¶s
+// --- [V5.3.18 é‡æ§‹] Check_Power_Toggle æ”¹åƒ PowerCtxï¼Œæƒ…å¢ƒè‡ªå¸¶ scopeï¼Œä¸å†é å…¨åŸŸæ——æ¨™åˆ¤æ–· ---
+int Check_Power_Toggle(PowerCtx *ctx) {
+    // 1. åµæ¸¬å¯¦é«” Red æŒ‰éˆ•ï¼ˆæ‰€æœ‰æƒ…å¢ƒçš†å¯ç”¨å¯¦é«”éµï¼‰
     if ((PA->PIN & BIT8) == 0) {
         Delay_ms(50);
         if ((PA->PIN & BIT8) == 0) {
-            *power_state = !(*power_state);
-            g_power_state = *power_state; // ¦P¨B¥ş°ì
+            ctx->power_state = !ctx->power_state;
+            if (ctx->scope == PWR_SCOPE_NETWORKED) g_power_state = ctx->power_state; // åƒ… Networked æƒ…å¢ƒé¡åƒçµ¦ WEB
             while ((PA->PIN & BIT8) == 0) {}
             Delay_ms(50);
-            
-            // --- [V5.3.17] ³æ¾÷¿ï³æ¼Ò¦¡¤U«Ì½ª UART1 ¿é¥X ---
-            if (!g_u8StandaloneMode) {
-                JIG_8CP_Send_Packet("PW", *power_state ? "ON" : "OFF");
+
+            // åªæœ‰ Networked æƒ…å¢ƒæ‰æœƒæŠŠé›»æºç‹€æ…‹å›å ±çµ¦ ESP32 (UART1)
+            if (ctx->scope == PWR_SCOPE_NETWORKED) {
+                JIG_8CP_Send_Packet("PW", ctx->power_state ? "ON" : "OFF");
             }
             return 1;
         }
     }
-    
-    // 2. °»´úºô­¶µo°eªº³nÅé±±¨î½Ğ¨D (µêÀÀ«ö¶s) - ¶È¦b«D³æ¾÷¹jÂ÷¼Ò¦¡¤U³B²z
-    if (!g_u8StandaloneMode) {
-        if (g_web_power_toggle_req == 1 && *power_state == 0) {
-            *power_state = 1;
+
+    // 2. åµæ¸¬ç¶²é ç™¼ä¾†çš„è»Ÿé«”æ§åˆ¶è«‹æ±‚ â€” åƒ… Networked æƒ…å¢ƒæœƒè™•ç†ï¼›
+    //    Isolated æƒ…å¢ƒå®Œå…¨ä¸è§¸ç¢° g_web_power_toggle_reqï¼ŒWEB é›»æºéµå¤©ç”Ÿå°å®ƒå€‘ç„¡æ•ˆã€‚
+    if (ctx->scope == PWR_SCOPE_NETWORKED) {
+        extern volatile int g_web_power_toggle_req;
+        if (g_web_power_toggle_req == 1 && ctx->power_state == 0) {
+            ctx->power_state = 1;
             g_power_state = 1;
             g_web_power_toggle_req = 0;
             return 1;
         }
-        if (g_web_power_toggle_req == 2 && *power_state == 1) {
-            *power_state = 0;
+        if (g_web_power_toggle_req == 2 && ctx->power_state == 1) {
+            ctx->power_state = 0;
             g_power_state = 0;
             g_web_power_toggle_req = 0;
-            return 1; 
+            return 1;
         }
+        g_web_power_toggle_req = 0; // æ¶ˆåŒ–éæœŸçš„å†—é¤˜æ——æ¨™
     }
-    
-    g_web_power_toggle_req = 0; // ®ø¤Æ¹L´Áªº¤¾¾lºX¼Ğ
+
     return 0;
 }
 
-void Trigger_Power_Protection(volatile int *power_state, const char* reason, float final_c, float final_v) {
-    // --- [V5.3.17] ³æ¾÷¿ï³æ¼Ò¦¡¤U«Ì½ª UART1 «OÅ@¦^³ø ---
-    if (!g_u8StandaloneMode) {
+void Trigger_Power_Protection(PowerCtx *ctx, const char* reason, float final_c, float final_v) {
+    // åªæœ‰ Networked æƒ…å¢ƒæ‰æœƒæŠŠä¿è­·å›å ±é€å¾€ ESP32
+    if (ctx->scope == PWR_SCOPE_NETWORKED) {
         char pd_buf[32];
         snprintf(pd_buf, sizeof(pd_buf), "%.1f,%.2f", final_c, final_v);
         JIG_8CP_Send_Packet("PD", pd_buf);
-        Delay_ms(50); 
+        Delay_ms(50);
     }
 
-    // 1. ±j¨î¤ÁÂ_¹êÅé¹q·½
-    PC->DOUT &= ~BIT7; 
-    *power_state = 0;
-    g_power_state = 0; // ¦P¨B¥ş°ìÅÜ¼Æ
-    g_is_overloading = 0;
-    
-    // --- [V5.3.17] ³æ¾÷¿ï³æ¼Ò¦¡¤U«Ì½ª UART1 ª¬ºA¦P¨B ---
-    if (!g_u8StandaloneMode) {
+    // 1. å¼·åˆ¶åˆ‡æ–·å¯¦é«”é›»æº
+    PC->DOUT &= ~BIT7;
+    ctx->power_state = 0;
+    if (ctx->scope == PWR_SCOPE_NETWORKED) g_power_state = 0;
+    ctx->is_overloading = 0;
+
+    if (ctx->scope == PWR_SCOPE_NETWORKED) {
         JIG_8CP_Send_Packet("PW", "OFF");
     }
-    
-    // 2. UI º¡ª©Äµ§i´£¥Ü (»\±¼­I´º)
+
+    // 2. UI æ»¿ç‰ˆè­¦å‘Šæç¤º (è“‹æ‰èƒŒæ™¯)
     UI_Clear();
     Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "================================");
     Safe_Print_OLED_Smooth(16, 0, 63, 0x0F, "    POWER PROTECT TRIGGERED!");
     Safe_Print_OLED_Smooth(32, 0, 63, 0x0F, "    REASON: %s", reason);
     Safe_Print_OLED_Smooth(48, 0, 63, 0x0F, "================================");
     UI_Update();
-    
-    // 3. ±j¯PÄµ³øÁn¡A¨Ãµ¹¤©µøÄ±©µ¿ğ
+
+    // 3. å¼·çƒˆè­¦å ±è²ï¼Œä¸¦çµ¦äºˆè¦–è¦ºå»¶é²
     for(int i=0; i<5; i++) { JigForceBeep(100); Delay_ms(100); }
-    Delay_ms(2000); 
+    Delay_ms(2000);
 }
 
-float Process_Background_Sampling(volatile int *power_state, uint32_t current_time_ms) {
+float Process_Background_Sampling(PowerCtx *ctx, uint32_t current_time_ms) {
     static uint32_t s_last_sample_ms = 0;
-    if (*power_state && (current_time_ms - s_last_sample_ms >= 20)) { // ¨C 20ms ±Ä¼Ë¤@¦¸
+    if (ctx->power_state && (current_time_ms - s_last_sample_ms >= 20)) { // æ¯ 20ms æ¡æ¨£ä¸€æ¬¡
         s_last_sample_ms = current_time_ms;
         float sample_c = getCurrent_mA();
         if (sample_c == 0.0f) { set237Calibration_1A(); sample_c = getCurrent_mA(); }
@@ -286,40 +337,40 @@ float Process_Background_Sampling(volatile int *power_state, uint32_t current_ti
         if (sample_c > g_fMaxCurrent) g_fMaxCurrent = sample_c;
         if (sample_c < g_fMinCurrent) g_fMinCurrent = sample_c;
 
-        // --- ¹q·½«OÅ@¾÷¨î (»İ­n¤w¦¬¨ì CF ³]©w­È¤~±Ò°Ê) ---
-        if (g_config_received) {
+        // --- é›»æºä¿è­·æ©Ÿåˆ¶ï¼šå®Œå…¨ä½¿ç”¨ã€Œæ­¤æƒ…å¢ƒè‡ªå·±çš„ã€é–€æª»ï¼Œä¸å†è®€å–ä»»ä½•å…¨åŸŸ g_cfg_* ---
+        if (ctx->config_received) {
             float sample_v = getBusVoltage_V();
-            
-            // 1. ¹qÀ£²§±` (Àş¶¡«OÅ@ - ¥ß¨èÄ²µo)
-            if (sample_v > g_cfg_voltage_max) {
-                Trigger_Power_Protection(power_state, "OVER VOLTAGE", sample_c, sample_v);
-                return sample_c; 
-            }
-            if (sample_v < g_cfg_voltage_min) {
-                Trigger_Power_Protection(power_state, "UNDER VOLTAGE", sample_c, sample_v);
+
+            // 1. é›»å£“ç•°å¸¸ (ç¬é–“ä¿è­· - ç«‹åˆ»è§¸ç™¼)
+            if (sample_v > ctx->voltage_max) {
+                Trigger_Power_Protection(ctx, "OVER VOLTAGE", sample_c, sample_v);
                 return sample_c;
             }
-            
-            // 2. ¹q¬y¶W¸ü (©µ¿ğ«OÅ@ - ®e§ÔÀş¶¡¬ğªi)
-            if (sample_c > g_cfg_current_max) {
-                if (!g_is_overloading) {
-                    g_is_overloading = 1;
-                    g_overload_start_tick = current_time_ms; // ¶}©l°O¿ı¶W¸ü®É¶¡
+            if (sample_v < ctx->voltage_min) {
+                Trigger_Power_Protection(ctx, "UNDER VOLTAGE", sample_c, sample_v);
+                return sample_c;
+            }
+
+            // 2. é›»æµè¶…è¼‰ (å»¶é²ä¿è­· - å®¹å¿ç¬é–“çªæ³¢)
+            if (sample_c > ctx->current_max) {
+                if (!ctx->is_overloading) {
+                    ctx->is_overloading = 1;
+                    ctx->overload_start_tick = current_time_ms; // é–‹å§‹è¨˜éŒ„è¶…è¼‰æ™‚é–“
                 } else {
-                    if ((current_time_ms - g_overload_start_tick) >= (g_cfg_overload_sec * 1000)) {
-                        Trigger_Power_Protection(power_state, "OVER CURRENT", sample_c, sample_v);
+                    if ((current_time_ms - ctx->overload_start_tick) >= ((uint32_t)ctx->overload_sec * 1000)) {
+                        Trigger_Power_Protection(ctx, "OVER CURRENT", sample_c, sample_v);
                         return sample_c;
                     }
                 }
             } else {
-                g_is_overloading = 0; // ¹q¬y­°¦^¥¿±`¡A²M°£­p®É
+                ctx->is_overloading = 0; // é›»æµé™å›æ­£å¸¸ï¼Œæ¸…é™¤è¨ˆæ™‚
             }
         }
-        return sample_c; 
-    } else if (!(*power_state)) {
-        g_is_overloading = 0; 
+        return sample_c;
+    } else if (!ctx->power_state) {
+        ctx->is_overloading = 0;
     }
-    return -1.0f; 
+    return -1.0f;
 }
 
 void Show_Test_Start_Screen(const char* title) {
@@ -350,16 +401,16 @@ void Update_Dashboard_Display(int power_state, int rx_count, const char* specifi
         
     UI_Clear();
     
-    // 1. ±Æª©²Ä¤@¦æ¡G¹q¬y¥­§¡­È»P³Ì¤j­È
+    // 1. æ’ç‰ˆç¬¬ä¸€è¡Œï¼šé›»æµå¹³å‡å€¼èˆ‡æœ€å¤§å€¼
     Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "AVG:%-6.1fmA   Max:%-6.1fmA", g_fCurrentAvg, g_fMaxCurrent);
     
-    // 2. ±Æª©²Ä¤G¦æ¡G¹ê®É¹q¬y»P³Ì¤p­È
+    // 2. æ’ç‰ˆç¬¬äºŒè¡Œï¼šå¯¦æ™‚é›»æµèˆ‡æœ€å°å€¼
     Safe_Print_OLED_Smooth(16, 0, 63, 0x0F, "CUR:%-6.1fmA   Min:%-6.0fmA", inst_current, (g_fMinCurrent==9999.0f)?0:g_fMinCurrent);
     
-    // 3. ±Æª©²Ä¤T¦æ¡G¹qÀ£»P¹q·½ª¬ºA
+    // 3. æ’ç‰ˆç¬¬ä¸‰è¡Œï¼šé›»å£“èˆ‡é›»æºç‹€æ…‹
     Safe_Print_OLED_Smooth(32, 0, 63, 0x0F, "%-5.2fV         [Power:%s]", voltage, power_state ? "ON " : "OFF");
     
-    // 4. ±Æª©²Ä¥|¦æ¡G°ÊºA¥~³¡¸ê®Æ (¨¾¿m¦r¦ê®æ¦¡¤Æ¶V¬É)
+    // 4. æ’ç‰ˆç¬¬å››è¡Œï¼šå‹•æ…‹å¤–éƒ¨è³‡æ–™ (é˜²ç¦¦å­—ä¸²æ ¼å¼åŒ–è¶Šç•Œ)
     if (strlen(specific_data_str) > 0 && rx_count >= 0) {
         Safe_Print_OLED_Smooth(48, 0, 63, 0x04, "%02d/%.28s", rx_count, specific_data_str); 
     } else {
@@ -370,7 +421,7 @@ void Update_Dashboard_Display(int power_state, int rx_count, const char* specifi
 }
 
 // =======================================================
-// [OLED UI Ã¸¹Ï©³¼h¤ŞÀº - ¤ä´© 128 ¦ì¤¸²`«×¤À°t½w½Ä°Ï]
+// [OLED UI ç¹ªåœ–åº•å±¤å¼•æ“ - æ”¯æ´ 128 ä½å…ƒæ·±åº¦åˆ†é…ç·©è¡å€]
 // =======================================================
 #define MAX_VRAM_LINES 8
 
@@ -474,7 +525,7 @@ void UI_Menu_Scroll_Anim_Smooth(const char* title, const char** items, int num_i
             Safe_Print_OLED_Smooth(64 - offset, 16, 63, 0x02, "  %s", items[nn_idx]); 
         } else { 
             Safe_Print_OLED_Smooth(0 + offset, 16, 63, 0x02, "  %s", items[pp_idx]); 
-            Safe_Print_OLED_Smooth(16 + offset, 16, 63, 0x04 + (offset/2), "> %s", items[p_idx]);
+            Safe_Print_OLED_Smooth(16 + offset, 16, 63, 0x04 + (offset/2), "  %s", items[p_idx]);
             Safe_Print_OLED_Smooth(32 + offset, 16, 63, 0x0F - (offset/2), "  %s", items[old_idx]);
             Safe_Print_OLED_Smooth(48 + offset, 16, 63, 0x02, "  %s", items[n_idx]);
         }
@@ -483,7 +534,7 @@ void UI_Menu_Scroll_Anim_Smooth(const char* title, const char** items, int num_i
 }
 
 // =======================================================
-// [¥ş°ìÄdºI¨t²Î»P¾xÄÁ¤ŞÀº]
+// [å…¨åŸŸæ””æˆªç³»çµ±èˆ‡é¬§é˜å¼•æ“]
 // =======================================================
 void Handle_Alarm_Trigger(void) {
     if (!g_alarm_triggered) return;
@@ -518,7 +569,7 @@ void Handle_Alarm_Trigger(void) {
 }
 
 void Global_Background_Tasks(void) {
-    Process_UART1_JIG_8CP_Parser(); // ºû«ù ESP32 ³q°T³q¹D±`¶}¡BµL·P¶Çµo
+    Process_UART1_JIG_8CP_Parser(); // ç¶­æŒ ESP32 é€šè¨Šé€šé“å¸¸é–‹ã€ç„¡æ„Ÿå‚³ç™¼
     USBHID_Process_Queue(); 
     
     static uint32_t s_last_rtc_read = 0;
@@ -552,7 +603,7 @@ int Get_Weekday(int year, int month, int day) {
 const char* week_str[] = {"Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri"};
 
 // =======================================================
-// [V5.3.3 ·s¬[ºc¡GUSB HID «D¦P¨B¦î¦C»Pµo°e¤ŞÀº]
+// [V5.3.3 æ–°æ¶æ§‹ï¼šUSB HID éåŒæ­¥ä½‡åˆ—èˆ‡ç™¼é€å¼•æ“]
 // =======================================================
 void USBHID_Enqueue_Data(const char* str) {
     while(*str) {
@@ -617,7 +668,7 @@ void USBHID_Process_Queue(void) {
 }
 
 // =======================================================
-// [UART1 »P«ü¥O¸ÑªR¤ŞÀº]
+// [UART1 èˆ‡æŒ‡ä»¤è§£æå¼•æ“]
 // =======================================================
 int UART1_Read_Byte(uint8_t *data) {
     if (g_u1_rx_head == g_u1_rx_tail) return 0;
@@ -638,6 +689,11 @@ void JIG_8CP_Send_Packet(const char* cmd_code, const char* data) {
     UART_WRITE(UART1, JIG_8CP_STX); UART1_Send_String(payload); UART1_Send_String(checksum); UART_WRITE(UART1, JIG_8CP_CR);
 }
 
+// g_web_power_toggle_req åƒ…åœ¨ Check_Power_Toggle åˆ¤æ–·ã€Œç›®å‰æƒ…å¢ƒæ˜¯å¦ Networkedã€æ™‚æ‰æœƒè¢«æ¶ˆåŒ–ï¼Œ
+// é€™è£¡ç¶­æŒå®ƒæ˜¯å…¨åŸŸï¼Œæ˜¯å› ç‚º ISR/Parser æ²’æœ‰æƒ…å¢ƒæ¦‚å¿µï¼Œåªè² è²¬å¿ å¯¦è¨˜éŒ„ã€ŒWEB ç«¯è¦æ±‚äº†ä»€éº¼ã€ï¼›
+// çœŸæ­£æ±ºå®šã€Œè¦ä¸è¦ç†å®ƒã€çš„æ¬ŠåŠ›ï¼Œäº¤å›çµ¦å‘¼å«è€…æ‰‹ä¸Šçš„ PowerCtxã€‚
+volatile int g_web_power_toggle_req = 0;
+
 void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
     if (strcmp(cmd_code, "SC") == 0) {
         USBHID_Enqueue_String(data); 
@@ -652,15 +708,20 @@ void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
         JIG_8CP_Send_Packet("GC", "?");
     }
     else if (strcmp(cmd_code, "CF") == 0) {
-        float scale, c_max, v_min, v_max;
-        int ov_sec;
-        if (sscanf(data, "%f,%f,%f,%f,%d", &scale, &c_max, &v_min, &v_max, &ov_sec) == 5) {
-            g_cfg_scale_max = scale;
-            g_cfg_current_max = c_max;
-            g_cfg_voltage_min = v_min;
-            g_cfg_voltage_max = v_max;
-            g_cfg_overload_sec = (uint8_t)ov_sec;
-            g_config_received = 1; 
+        // --- [V5.3.18] CF åªæœƒå¯«å…¥ã€Œç›®å‰è¨»å†Šçš„ Networked æƒ…å¢ƒã€ï¼›
+        //     è‹¥ç›®å‰æ­£åœ¨ Wiegand/TK2/RS232 (Isolatedï¼Œæœªè¨»å†Š)ï¼Œæ­¤æŒ‡ä»¤æœƒè¢«ç›´æ¥å¿½ç•¥ï¼Œ
+        //     ä¸æœƒæœ‰ä»»ä½•æ®˜ç•™è¨­å®šå¯ä»¥æ›åˆ°é€™äº›ä»‹é¢ä¸Šã€‚
+        if (g_pActiveNetworkedCtx != NULL) {
+            float scale, c_max, v_min, v_max;
+            int ov_sec;
+            if (sscanf(data, "%f,%f,%f,%f,%d", &scale, &c_max, &v_min, &v_max, &ov_sec) == 5) {
+                PowerCtx *ctx = (PowerCtx *)g_pActiveNetworkedCtx;
+                ctx->current_max  = c_max;
+                ctx->voltage_min  = v_min;
+                ctx->voltage_max  = v_max;
+                ctx->overload_sec = (uint8_t)ov_sec;
+                ctx->config_received = 1;
+            }
         }
     }
     else if (strcmp(cmd_code, "ST") == 0) {
@@ -703,6 +764,8 @@ void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
         if (strcmp(data, "?") == 0) {
             JIG_8CP_Send_Packet("PW", g_power_state ? "ON" : "OFF");
         }
+        // --- [V5.3.18] PW ON/OFF ä¸€å¾‹å…ˆè¨˜éŒ„æ——æ¨™ï¼ŒçœŸæ­£æ˜¯å¦ç”Ÿæ•ˆç”± Check_Power_Toggle
+        //     ä¾ã€Œå‘¼å«è€…æƒ…å¢ƒæ˜¯å¦ç‚º Networkedã€æ±ºå®š -> Isolated ä»‹é¢ä¸‹ WEB é›»æºéµå¤©ç”Ÿç„¡æ•ˆ
         else if (strstr(data, "ON") != NULL) {
             g_web_power_toggle_req = 1;
         } 
@@ -747,7 +810,7 @@ void Process_UART1_JIG_8CP_Parser(void) {
 }
 
 // =======================================================
-// [PinConfig »P©³¼hµwÅéªì©l¤Æ]
+// [PinConfig èˆ‡åº•å±¤ç¡¬é«”åˆå§‹åŒ–]
 // =======================================================
 void WIFIBLE_ReaderTest_init(void) {
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA5MFP_Msk | SYS_GPA_MFPL_PA4MFP_Msk);  SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA5MFP_I2C0_SCL | SYS_GPA_MFPL_PA4MFP_I2C0_SDA);
@@ -764,7 +827,7 @@ void WIFIBLE_ReaderTest_init(void) {
     SYS->GPF_MFPH &= ~(SYS_GPF_MFPH_PF15MFP_Msk | SYS_GPF_MFPH_PF14MFP_Msk);  SYS->GPF_MFPH |= (SYS_GPF_MFPH_PF15MFP_GPIO | SYS_GPF_MFPH_PF14MFP_GPIO);
     SYS->GPF_MFPL &= ~(SYS_GPF_MFPL_PF6MFP_Msk | SYS_GPF_MFPL_PF5MFP_Msk | SYS_GPF_MFPL_PF4MFP_Msk | SYS_GPF_MFPL_PF3MFP_Msk | SYS_GPF_MFPL_PF2MFP_Msk); SYS->GPF_MFPL |= (SYS_GPF_MFPL_PF6MFP_GPIO | SYS_GPF_MFPL_PF5MFP_GPIO | SYS_GPF_MFPL_PF4MFP_GPIO | SYS_GPF_MFPL_PF3MFP_GPIO | SYS_GPF_MFPL_PF2MFP_GPIO);
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA3MFP_Msk | SYS_GPA_MFPL_PA2MFP_Msk | SYS_GPA_MFPL_PA0MFP_Msk); SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA3MFP_SPI0_SS | SYS_GPA_MFPL_PA2MFP_SPI0_CLK | SYS_GPA_MFPL_PA0MFP_SPI0_MOSI);
-    SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB13MFP_Msk | SYS_GPB_MFPH_PB12MFP_Msk); SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB13MFP_GPIO | SYS_GPB_MFPH_PB12MFP_GPIO); // ¼o°£ UART0 Âà¯Â GPIO
+    SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB13MFP_Msk | SYS_GPB_MFPH_PB12MFP_Msk); SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB13MFP_GPIO | SYS_GPB_MFPH_PB12MFP_GPIO); // å»¢é™¤ UART0 è½‰ç´” GPIO
     SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB3MFP_Msk | SYS_GPB_MFPL_PB2MFP_Msk); SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB3MFP_UART1_TXD | SYS_GPB_MFPL_PB2MFP_UART1_RXD);
     SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB1MFP_Msk | SYS_GPB_MFPL_PB0MFP_Msk); SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB1MFP_UART2_TXD | SYS_GPB_MFPL_PB0MFP_UART2_RXD);
 }
@@ -818,7 +881,7 @@ void SYS_Init(void) {
 }
 
 // =======================================================
-// [¤¤Â_»P©µ¿ğ¼Ò²Õ]
+// [ä¸­æ–·èˆ‡å»¶é²æ¨¡çµ„]
 // =======================================================
 void TMR1_IRQHandler(void) {
     if(TIMER_GetIntFlag(TIMER1)) {
@@ -864,7 +927,7 @@ void JigForceBeep(uint32_t ms) { uint32_t half_period_us = 185; uint32_t total_c
 void JigBeep(uint32_t ms) { if (g_u8BuzzerEnabled == 1) { JigForceBeep(ms); } }
 
 // =======================================================
-// [V5.3.0 Time Set - ½Xªí¡B¾xÄÁ¡B®É¶¡³]©w¿ï³æ]
+// [V5.3.0 Time Set - ç¢¼è¡¨ã€é¬§é˜ã€æ™‚é–“è¨­å®šé¸å–®]
 // =======================================================
 void RTC_Time_Date_Loop(void) {
     RTC_TimeTypeDef edit_time;
@@ -1060,8 +1123,14 @@ void Time_Set_Menu_Loop(void) {
     }
 }
 
+// --- [V5.3.18 é‡æ§‹] Power_Monitor_Loopï¼šå”¯ä¸€æ“æœ‰ PWR_SCOPE_NETWORKED æƒ…å¢ƒçš„ä»‹é¢ ---
 void Power_Monitor_Loop(void) {
-    g_u8StandaloneMode = 0; // ½T«O¦bÁpºôºÊ±±¥\¯à¤U¬°¥¿±`¼Ò¦¡
+    PowerCtx ctx;
+    PowerCtx_Init(&ctx, PWR_SCOPE_NETWORKED);
+
+    // è¨»å†Šè‡ªå·±ç‚ºã€Œç›®å‰æ¥å— WEB CF/PW æŒ‡ä»¤ã€çš„æƒ…å¢ƒï¼›é›¢é–‹æœ¬å‡½å¼æ™‚å‹™å¿…æ¸…é™¤ï¼ˆè¦‹æ–‡æœ« g_pActiveNetworkedCtx = NULLï¼‰
+    g_pActiveNetworkedCtx = &ctx;
+
     UI_Clear(); 
     Safe_Print_OLED(0, "Power Monitor"); 
     Safe_Print_OLED(16, "Red Btn (Power)"); 
@@ -1069,7 +1138,6 @@ void Power_Monitor_Loop(void) {
     UI_Update(); 
     Delay_ms(1000); 
 
-    int power_state = 0;
     uint8_t last_white = 1;
 
     uint32_t last_ui_update_ms = g_u32SystemMs; 
@@ -1081,11 +1149,9 @@ void Power_Monitor_Loop(void) {
 
     while(1) {
         Global_Background_Tasks(); if (g_force_alarm_menu) break; 
-        
-        power_state = g_power_state;
 
-        if (Check_Power_Toggle(&power_state)) {
-            if (power_state) { 
+        if (Check_Power_Toggle(&ctx)) {
+            if (ctx.power_state) { 
                 PC->DOUT |= BIT7; 
                 JigBeep(100); 
             } else { 
@@ -1097,7 +1163,7 @@ void Power_Monitor_Loop(void) {
             last_pd_send_ms = g_u32SystemMs; 
         }
 
-        Process_Background_Sampling(&g_power_state, g_u32SystemMs); // ¶Ç¤Jµ´¹ï¨t²Î²@¬í
+        Process_Background_Sampling(&ctx, g_u32SystemMs);
 
         if (Check_Reset_Button()) { 
             last_ui_update_ms = g_u32SystemMs; 
@@ -1117,7 +1183,7 @@ void Power_Monitor_Loop(void) {
         if (Check_Exit_Button()) break;
 
         // ---------------------------------------------------
-        // [¥ô°È A] ¿Ã¹õ¨ê·s (µ´¹ï®É¶¡±±¨î)
+        // [ä»»å‹™ A] è¢å¹•åˆ·æ–° (çµ•å°æ™‚é–“æ§åˆ¶)
         // ---------------------------------------------------
         if (g_u32SystemMs - last_ui_update_ms >= UI_UPDATE_INTERVAL_MS) {
             float voltage = getBusVoltage_V(); 
@@ -1129,7 +1195,7 @@ void Power_Monitor_Loop(void) {
             
             snprintf(buf1, 33, "AVG:%-6.1fmA        Max:%-6.1fmA", g_fCurrentAvg, g_fMaxCurrent);
             snprintf(buf2, 33, "CUR:%-6.1fmA        Min:%-6.0fmA", inst_current, (g_fMinCurrent==9999.0f)?0:g_fMinCurrent);
-            snprintf(buf3, 33, "%-5.2fV              [Power:%s]", voltage, power_state?"ON ":"OFF");
+            snprintf(buf3, 33, "%-5.2fV              [Power:%s]", voltage, ctx.power_state?"ON ":"OFF");
 
             if (g_u8WifiConnected) {
                 snprintf(buf4, 33, "IP:%-14s B:Rst R:Pwr", g_szWifiIP); 
@@ -1149,9 +1215,9 @@ void Power_Monitor_Loop(void) {
         }
 
         // ---------------------------------------------------
-        // [¥ô°È B] ¼Æ¾Ú¶Ç°e WEB (¥¿±`¼Ò¦¡)
+        // [ä»»å‹™ B] æ•¸æ“šå‚³é€ WEB (æ­£å¸¸æ¨¡å¼)
         // ---------------------------------------------------
-        if (g_u8WifiConnected && power_state) {
+        if (g_u8WifiConnected && ctx.power_state) {
             if (g_u32SystemMs - last_pd_send_ms >= PD_SEND_INTERVAL_MS) { 
                 char data_str[32];
                 float inst_current = getCurrent_mA(); 
@@ -1167,14 +1233,18 @@ void Power_Monitor_Loop(void) {
         Delay_ms(1); 
     }
     
-    PC->DOUT &= ~BIT7; g_power_state = 0; UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
+    PC->DOUT &= ~BIT7; g_power_state = 0; 
+    g_pActiveNetworkedCtx = NULL; // --- [V5.3.18] é›¢é–‹æ™‚å‹™å¿…æ¸…é™¤è¨»å†Šï¼Œä¹‹å¾Œ CF/PW ä¸€å¾‹ç„¡æ•ˆç›´åˆ°ä¸‹æ¬¡é€²å…¥ ---
+    UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
 
 // =======================================================
-// [¦U¦¡ºÊ±± UI ¤¶­±] - ¯Â³æ¾÷¹jÂ÷¼Ò¦¡ (¤£¥á¦V UART1)
+// [å„å¼ç›£æ§ UI ä»‹é¢] - PWR_SCOPE_ISOLATEDï¼šå®Œå…¨ç¨ç«‹æƒ…å¢ƒï¼Œå¤©ç”Ÿä¸å— WEB CF/PW å½±éŸ¿
 // =======================================================
 void UART_Monitor_Test(uint32_t u32BaudRate) {
-    g_u8StandaloneMode = 1; // ±j¨î¶}±Ò³æ¾÷¼Ò¦¡¹jÂ÷
+    PowerCtx ctx;
+    PowerCtx_Init(&ctx, PWR_SCOPE_ISOLATED); // å¾ä¸è¨»å†Š g_pActiveNetworkedCtx -> WEB CF/PW å°æ­¤ä»‹é¢æ°¸é ç„¡æ•ˆ
+
     UART_DisableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk); Interface_init(); PB4 = 1;                
     UART_Open(UART2, u32BaudRate); UART2->FIFO = (UART2->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE;
     UART_EnableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
@@ -1185,9 +1255,9 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
     static char rx_buf[128];
     memset(rx_buf, 0, sizeof(rx_buf));
     
-    uint32_t loop_tick = 1000; int power_state = 0;
+    // --- [V5.3.18] ä¿®æ­£è¨ˆæ™‚ bugï¼šä¸€å¾‹ä½¿ç”¨ç¡¬é«”çµ•å°æ™‚é˜ g_u32SystemMsï¼Œä¸å†ä½¿ç”¨ç›¸å°è¨ˆæ•¸ loop_tick ---
+    uint32_t loop_tick = 1000;
 
-    // --- [V5.3.17 ·s¼W] ®É¶¡ÂW¥]§ÀÂ_°T§P©wªk±M¥ÎÅÜ¼Æ ---
     int rx_len = 0;
     uint32_t last_rx_time = 0;
     uint8_t packet_started = 0;
@@ -1196,8 +1266,8 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
 
     while(1) {
         Global_Background_Tasks(); if (g_force_alarm_menu) break; 
-        if (Check_Power_Toggle(&power_state)) {
-            if (power_state) { 
+        if (Check_Power_Toggle(&ctx)) {
+            if (ctx.power_state) { 
                 PC->DOUT |= BIT7; JigBeep(100); 
                 __disable_irq(); g_u2_rx_head = 0; g_u2_rx_tail = 0; UART2->FIFO |= UART_FIFO_RXRST_Msk; __enable_irq(); 
                 rx_len = 0; packet_started = 0;
@@ -1207,30 +1277,30 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
             Reset_Current_Filter(); loop_tick = 1000;
         }
         
-        Process_Background_Sampling(&g_power_state, g_u32SystemMs); // ­×¥¿¶Ç¤Jµ´¹ï¨t²Î²@¬í
+        Process_Background_Sampling(&ctx, g_u32SystemMs);
         if (Check_Reset_Button()) loop_tick = 1000;
         
-        if (g_power_state) {
-            // ±q­I´º Ring Buffer ¤¤«ùÄò©Ô¥X¦r¤¸¨Ã²Ö¿n
+        if (ctx.power_state) {
+            // å¾èƒŒæ™¯ Ring Buffer ä¸­æŒçºŒæ‹‰å‡ºå­—å…ƒä¸¦ç´¯ç©
             while(g_u2_rx_head != g_u2_rx_tail && rx_len < 127) {
                 char c = g_u2_rx_buf[g_u2_rx_tail];
                 g_u2_rx_tail = (g_u2_rx_tail + 1) % UART2_RX_BUF_SIZE;
                 
                 if(c >= 0x20 && c <= 0x7E) rx_buf[rx_len++] = c;
-                else rx_buf[rx_len++] = '.'; // «e¸m½X 0x02 ±N¦b¦¹³Q¥¿½TÂà¤Æ¬° '.' ¨Ã¦w¥ş²Ö¿n
+                else rx_buf[rx_len++] = '.'; // å‰ç½®ç¢¼ 0x02 å°‡åœ¨æ­¤è¢«æ­£ç¢ºè½‰åŒ–ç‚º '.' ä¸¦å®‰å…¨ç´¯ç©
                 
                 last_rx_time = g_u32SystemMs;
                 packet_started = 1;
             }
             
-            // ¥]§ÀÂ_°T§PÂ_¡G·í¤w¸g¶}©l¦¬¸ê®Æ¡A¥B¶ZÂ÷³Ì«á¤@¦¸¦¬¦r¤¸¶W¹L 50ms¡Aµø¬°¤@¥]§¹¾ãªº¥d¸¹
+            // åŒ…å°¾æ–·è¨Šåˆ¤æ–·ï¼šç•¶å·²ç¶“é–‹å§‹æ”¶è³‡æ–™ï¼Œä¸”è·é›¢æœ€å¾Œä¸€æ¬¡æ”¶å­—å…ƒè¶…é 50msï¼Œè¦–ç‚ºä¸€åŒ…å®Œæ•´çš„å¡è™Ÿ
             if (packet_started && (g_u32SystemMs - last_rx_time >= 50)) {
                 rx_buf[rx_len] = '\0';
                 rx_count++;
                 JigBeep(50);
                 packet_started = 0;
-                rx_len = 0;       // ²MªÅ­p¼Æ¨Ñ¤U¤@¥]¨Ï¥Î
-                loop_tick = 1000; // ±j¨î OLED ¥ß¨è­«Ã¸
+                rx_len = 0;       // æ¸…ç©ºè¨ˆæ•¸ä¾›ä¸‹ä¸€åŒ…ä½¿ç”¨
+                loop_tick = 1000; // å¼·åˆ¶ OLED ç«‹åˆ»é‡ç¹ª
             }
         } else {
             __disable_irq(); g_u2_rx_head = 0; g_u2_rx_tail = 0; __enable_irq();
@@ -1238,75 +1308,186 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
         }
         
         if (Check_Exit_Button()) break;
-        if (loop_tick >= 1000) { Update_Dashboard_Display(g_power_state, rx_count, rx_buf); loop_tick = 0; }
+        if (loop_tick >= 1000) { Update_Dashboard_Display(ctx.power_state, rx_count, rx_buf); loop_tick = 0; }
         Delay_ms(1); loop_tick++;
     }
-    PC->DOUT &= ~BIT7; g_power_state = 0; g_u8StandaloneMode = 0; UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
+    PC->DOUT &= ~BIT7; UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
 
+
+#include <stdint.h>
+#include <stdbool.h>
+// [V5.3.18 æ¶æ§‹é‡æ§‹-é›»æºæƒ…å¢ƒéš”é›¢] ... (ä¿ç•™åŸæœ‰çš„ PowerCtx å®šç¾©èˆ‡å‡½å¼ ...)
+
+// [V5.3.19 æ–°å¢] Wiegand/TK2 ç•°å¸¸åµæ¸¬å¸¸æ•¸
+#define WIEGAND_TIMEOUT_MS          500  // æ¥æ”¶ä¸€çµ„å®Œæ•´ Wiegand è³‡æ–™çš„æœ€å¤§å…è¨±æ™‚é–“ (æ¯«ç§’)
+#define WIEGAND_MAX_BITS            64   // Wiegand è³‡æ–™æœ€å¤§ä½å…ƒæ•¸ä¸Šé™
+#define TK2_TIMEOUT_MS              1000 // æ¥æ”¶ä¸€çµ„å®Œæ•´ TK2 è³‡æ–™çš„æœ€å¤§å…è¨±æ™‚é–“ (æ¯«ç§’)
+#define TK2_MAX_BITS                256  // TK2 è³‡æ–™æœ€å¤§ä½å…ƒæ•¸ä¸Šé™ (æ ¹æ“šå¯¦éš›å”è­°èª¿æ•´)
+
 void Wiegand_Monitor_Test(void) {
-    Interface_init(); PB6 = 1; PA11 = 1; 
-    
-    // [¨¾½u1] ³]©w Quasi ¼Ò¦¡«á¡A±j¨î¿é¥X 1 ¶}±Ò¤º³¡®z¤W©Ô¡A©è§ÜÂø°T¡I
+    PowerCtx ctx;
+    PowerCtx_Init(&ctx, PWR_SCOPE_ISOLATED);
+
+    Interface_init(); PB6 = 1; PA11 = 1;
+
+    // [é˜²ç·š1] è¨­å®š Quasi æ¨¡å¼å¾Œï¼Œå¼·åˆ¶è¼¸å‡º 1 é–‹å•Ÿå…§éƒ¨å¼±ä¸Šæ‹‰ï¼ŒæŠµæŠ—é›œè¨Šï¼
     GPIO_SetMode(PA, BIT10, GPIO_MODE_QUASI); PA->DOUT |= BIT10;
     GPIO_SetMode(PB, BIT5,  GPIO_MODE_QUASI); PB->DOUT |= BIT5;
-    GPIO_DisableInt(PA, 10); 
+    GPIO_DisableInt(PA, 10);
     GPIO_DisableInt(PB, 5);
-    
-    Show_Test_Start_Screen("Wiegand Monitor"); 
-    int rx_count = 0; uint32_t loop_tick = 1000; int power_state = 0; 
-    uint64_t last_wg_data = 0; 
-    uint8_t last_wg_bits = 0; // ³Æ¥÷¯u¹êªº bit ¼Æ
-    
+
+    Show_Test_Start_Screen("Wiegand Monitor");
+    int rx_count = 0;
+    uint32_t loop_tick = 1000;
+    uint64_t last_wg_data = 0;
+    uint8_t last_wg_bits = 0;
+
     static char data_str[32];
     strcpy(data_str, "WAITING...");
 
-    // [¨¾½u2] ¶i³õ¤j±½°£¡G¹ı©³²MªÅ±q TK2 ´İ¯d¹L¨Óªº«ÕÆF¸ê®Æ
+    // [V5.3.19 æ–°å¢] Wiegand ç•°å¸¸åµæ¸¬è®Šæ•¸
+    uint32_t wg_start_time = 0; // è¨˜éŒ„æœ¬æ¬¡æ¥æ”¶é–‹å§‹çš„æ™‚é–“
+    uint32_t wg_last_activity_time = 0; // è¨˜éŒ„æœ€å¾Œä¸€æ¬¡æ¥æ”¶æ´»å‹•çš„æ™‚é–“
+    bool wg_receiving_active = false; // æ¨™è¨˜æ˜¯å¦æ­£åœ¨æ¥æ”¶ä¸­
+    uint8_t wg_bit_count = 0; // æœ¬æ¬¡æ¥æ”¶çš„ä½å…ƒè¨ˆæ•¸ (ç”¨æ–¼ç•°å¸¸æª¢æŸ¥ï¼Œå¯èƒ½èˆ‡ g_u8WiegandNum æœ‰å·®ç•°)
+
+    // [é˜²ç·š2] é€²å ´å¤§æƒé™¤ï¼šå¾¹åº•æ¸…ç©ºå¾ TK2 æ®˜ç•™éä¾†çš„å¹½éˆè³‡æ–™
     QUEUE_CLEAR(au64WG1);
     g_u8WiegandNum = 0;
+    // [V5.3.19 æ–°å¢] åˆå§‹åŒ–ç•°å¸¸åµæ¸¬è®Šæ•¸
+    wg_start_time = g_u32SystemMs;
+    wg_last_activity_time = g_u32SystemMs;
+    wg_receiving_active = false;
+    wg_bit_count = 0;
 
     while(1) {
-        Global_Background_Tasks(); if (g_force_alarm_menu) break;
-        if (Check_Power_Toggle(&power_state)) {
-            if (power_state) { 
-                PC->DOUT |= BIT7; JigBeep(100); 
-                QUEUE_CLEAR(au64WG1); g_u8WiegandNum = 0; 
-                GPIO_CLR_INT_FLAG(PA, BIT10); GPIO_CLR_INT_FLAG(PB, BIT5); 
-                GPIO_EnableInt(PA, 10, GPIO_INT_FALLING); GPIO_EnableInt(PB, 5, GPIO_INT_FALLING);  
-                NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn); 
-            } else { 
-                GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); 
-                PC->DOUT &= ~BIT7; JigBeep(500); 
+        Global_Background_Tasks();
+        if (g_force_alarm_menu) break;
+
+        if (Check_Power_Toggle(&ctx)) {
+            if (ctx.power_state) {
+                PC->DOUT |= BIT7;
+                JigBeep(100);
+                QUEUE_CLEAR(au64WG1);
+                g_u8WiegandNum = 0;
+                // [V5.3.19 æ–°å¢] é‡ç½® Wiegand ç‹€æ…‹æ©Ÿè®Šæ•¸
+                wg_start_time = g_u32SystemMs;
+                wg_last_activity_time = g_u32SystemMs;
+                wg_receiving_active = false;
+                wg_bit_count = 0;
+                Delay_ms(50); // ç­‰å¾…ç¹¼é›»å™¨æ¥é»èˆ‡æ¥åœ°é›»ä½ç©©å®šï¼Œé¿é–‹åˆ‡æ›ç¬é–“çš„é›œè¨Šçª—å£
+                GPIO_CLR_INT_FLAG(PA, BIT10); GPIO_CLR_INT_FLAG(PB, BIT5);
+                GPIO_EnableInt(PA, 10, GPIO_INT_FALLING); GPIO_EnableInt(PB, 5, GPIO_INT_FALLING);
+                NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
+            } else {
+                GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5);
+                PC->DOUT &= ~BIT7;
+                JigBeep(500);
+                 // [V5.3.19 æ–°å¢] ç•¶é›»æºé—œé–‰æ™‚ï¼Œä¹Ÿé‡ç½® Wiegand ç‹€æ…‹æ©Ÿè®Šæ•¸
+                 wg_receiving_active = false;
+                 wg_bit_count = 0;
             }
-            Reset_Current_Filter(); loop_tick = 1000;
+            Reset_Current_Filter();
+            loop_tick = 1000;
         }
-        
-        Process_Background_Sampling(&power_state, loop_tick); 
-        if (Check_Reset_Button()) loop_tick = 1000; 
+
+        Process_Background_Sampling(&ctx, g_u32SystemMs);
+        if (Check_Reset_Button()) {
+            loop_tick = 1000;
+            // [V5.3.19 æ–°å¢] æŒ‰ä¸‹é‡ç½®æŒ‰éˆ•æ™‚ï¼Œä¹Ÿé‡ç½® Wiegand ç‹€æ…‹æ©Ÿè®Šæ•¸
+            wg_receiving_active = false;
+            wg_bit_count = 0;
+        }
         vCheckingTimeOut();
-        
-        if (!QUEUE_EMPTY(au64WG1)) { 
-            // [¨¾½u3] Ãö³¬¤¤Â_¡I¨¾¤î JigBeep ²£¥ÍÂø°TÅı W26 ÅÜ¦¨ W34
-            NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
-            
-            last_wg_data = QUEUE_PULL(au64WG1); 
-            last_wg_bits = (g_u8WiegandNum > 0) ? g_u8WiegandNum : 26; 
-            g_u8WiegandNum = 0; // ±j¨îÂk¹s
-            
-            rx_count++; 
-            JigBeep(50); 
-            loop_tick = 1000; 
-            
-            // ²M°£Âø°TºX¼Ğ«á¦A­«±Ò¤¤Â_
-            GPIO_CLR_INT_FLAG(PA, BIT10); GPIO_CLR_INT_FLAG(PB, BIT5);
-            if(power_state) NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
+
+        // [V5.3.19 æ–°å¢] æª¢æŸ¥ Wiegand æ¥æ”¶æ˜¯å¦ç•°å¸¸
+        uint32_t current_time = g_u32SystemMs;
+        if (ctx.power_state && wg_receiving_active) {
+            // 1. æª¢æŸ¥è¶…æ™‚
+            if (current_time - wg_start_time > WIEGAND_TIMEOUT_MS) {
+         
+                // è§¸ç™¼éŒ¯èª¤è™•ç†
+                // [V5.3.19 æ–°å¢] é‡ç½®ç‹€æ…‹æ©Ÿ
+                QUEUE_CLEAR(au64WG1);
+                g_u8WiegandNum = 0;
+                wg_receiving_active = false;
+                wg_bit_count = 0;
+                wg_start_time = current_time; // é‡ç½®é–‹å§‹æ™‚é–“
+                wg_last_activity_time = current_time; // é‡ç½®æ´»å‹•æ™‚é–“
+                // å¯é¸ï¼šç™¼å‡ºè­¦å‘ŠéŸ³æˆ–åœ¨ UI é¡¯ç¤ºéŒ¯èª¤
+                // JigForceBeep(200); // çŸ­ä¿ƒè­¦å‘ŠéŸ³
+            }
+            // 2. æª¢æŸ¥ä½å…ƒæ•¸
+            else if (wg_bit_count > WIEGAND_MAX_BITS) {
+                
+                 // è§¸ç™¼éŒ¯èª¤è™•ç†
+                 // [V5.3.19 æ–°å¢] é‡ç½®ç‹€æ…‹æ©Ÿ
+                 QUEUE_CLEAR(au64WG1);
+                 g_u8WiegandNum = 0;
+                 wg_receiving_active = false;
+                 wg_bit_count = 0;
+                 wg_start_time = current_time; // é‡ç½®é–‹å§‹æ™‚é–“
+                 wg_last_activity_time = current_time; // é‡ç½®æ´»å‹•æ™‚é–“
+                 // å¯é¸ï¼šç™¼å‡ºè­¦å‘ŠéŸ³æˆ–åœ¨ UI é¡¯ç¤ºéŒ¯èª¤
+                 // JigForceBeep(200); // çŸ­ä¿ƒè­¦å‘ŠéŸ³
+            }
+            // 3. æª¢æŸ¥æ¥æ”¶åœæ»¯ (å¦‚æœé•·æ™‚é–“æ²’æœ‰æ–°æ´»å‹•ï¼Œä¹Ÿè¦–ç‚ºè¶…æ™‚)
+            else if (current_time - wg_last_activity_time > (WIEGAND_TIMEOUT_MS / 2)) { // è¨­å®šä¸€åŠæ™‚é–“ç‚ºåœæ»¯é–¥å€¼
+                
+                 // è§¸ç™¼éŒ¯èª¤è™•ç†
+                 // [V5.3.19 æ–°å¢] é‡ç½®ç‹€æ…‹æ©Ÿ
+                 QUEUE_CLEAR(au64WG1);
+                 g_u8WiegandNum = 0;
+                 wg_receiving_active = false;
+                 wg_bit_count = 0;
+                 wg_start_time = current_time; // é‡ç½®é–‹å§‹æ™‚é–“
+                 wg_last_activity_time = current_time; // é‡ç½®æ´»å‹•æ™‚é–“
+                 // å¯é¸ï¼šç™¼å‡ºè­¦å‘ŠéŸ³æˆ–åœ¨ UI é¡¯ç¤ºéŒ¯èª¤
+                 // JigForceBeep(200); // çŸ­ä¿ƒè­¦å‘ŠéŸ³
+            }
         }
-        
+
+
+        if (!QUEUE_EMPTY(au64WG1)) {
+            // [é˜²ç·š3] é—œé–‰ä¸­æ–·ï¼é˜²æ­¢ JigBeep ç”¢ç”Ÿé›œè¨Šè®“ W26 è®Šæˆ W34
+            NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
+
+            last_wg_data = QUEUE_PULL(au64WG1);
+            last_wg_bits = (g_u8WiegandNum > 0) ? g_u8WiegandNum : 26;
+            g_u8WiegandNum = 0; // å¼·åˆ¶æ­¸é›¶ (å¾ queue pull å‡ºä¾†å¾Œå°±æ­¸é›¶)
+
+            rx_count++;
+            JigBeep(50);
+            loop_tick = 1000;
+
+            // [V5.3.19 æ–°å¢] æ¥æ”¶åˆ°è³‡æ–™å¾Œï¼Œæ¨™è¨˜æ¥æ”¶çµæŸï¼Œé‡ç½®ç‹€æ…‹æ©Ÿè®Šæ•¸
+            wg_receiving_active = false;
+            wg_bit_count = 0;
+
+            // æ¸…é™¤é›œè¨Šæ——æ¨™å¾Œå†é‡å•Ÿä¸­æ–·
+            GPIO_CLR_INT_FLAG(PA, BIT10); GPIO_CLR_INT_FLAG(PB, BIT5);
+            if(ctx.power_state) NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
+        }
+
+        // [V5.3.19 æ–°å¢] æª¢æŸ¥æ˜¯å¦é–‹å§‹æ¥æ”¶ (g_u8WiegandNum > 0 ä¸”ä¹‹å‰æœªåœ¨æ¥æ”¶ä¸­)
+        if (ctx.power_state && g_u8WiegandNum > 0 && !wg_receiving_active) {
+             wg_receiving_active = true;
+             wg_start_time = current_time;
+             wg_last_activity_time = current_time;
+             wg_bit_count = g_u8WiegandNum; // åˆå§‹åŒ–ä½å…ƒè¨ˆæ•¸
+        }
+        // [V5.3.19 æ–°å¢] æ›´æ–°ä½å…ƒè¨ˆæ•¸å’Œæœ€å¾Œæ´»å‹•æ™‚é–“ (å¦‚æœæ­£åœ¨æ¥æ”¶ä¸­)
+        if (ctx.power_state && wg_receiving_active && g_u8WiegandNum > wg_bit_count) {
+             wg_bit_count = g_u8WiegandNum;
+             wg_last_activity_time = current_time; // æ›´æ–°æœ€å¾Œæ´»å‹•æ™‚é–“
+        }
+
+
         if (Check_Exit_Button()) break;
-        
+
         if (loop_tick >= 1000) {
             if (rx_count > 0) {
-                // ¦w¥ş©î¸Ñ 64-bit Á×§K M0 ´¹¤ù¦L¥X¶Ã½X
                 uint32_t wg_h = (uint32_t)(last_wg_data >> 32);
                 uint32_t wg_l = (uint32_t)(last_wg_data & 0xFFFFFFFF);
                 if (wg_h > 0) snprintf(data_str, sizeof(data_str), "W%02d:%X%08X", (int)last_wg_bits, wg_h, wg_l);
@@ -1314,14 +1495,15 @@ void Wiegand_Monitor_Test(void) {
             } else {
                 strcpy(data_str, "WAITING...");
             }
-            Update_Dashboard_Display(power_state, rx_count, data_str); 
-            loop_tick = 0; 
+            Update_Dashboard_Display(ctx.power_state, rx_count, data_str);
+            loop_tick = 0;
         }
         Delay_ms(1); loop_tick++;
     }
-    PC->DOUT &= ~BIT7; GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); 
+    PC->DOUT &= ~BIT7; GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5);
     UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
+
 
 
 
@@ -1332,77 +1514,183 @@ void Decode_TK2_Raw(char* out_str) {
 }
 
 void TK2_Monitor_Test(void) {
-    Interface_init(); PB7 = 1; PA11 = 1; 
-    
-    // [¨¾½u1] ³]©w Quasi ¼Ò¦¡«á¡A±j¨î¿é¥X 1 ¶}±Ò¤º³¡®z¤W©Ô
+    PowerCtx ctx;
+    PowerCtx_Init(&ctx, PWR_SCOPE_ISOLATED);
+
+    Interface_init(); PB7 = 1; PA11 = 1;
+
+    // [é˜²ç·š1] è¨­å®š Quasi æ¨¡å¼å¾Œï¼Œå¼·åˆ¶è¼¸å‡º 1 é–‹å•Ÿå…§éƒ¨å¼±ä¸Šæ‹‰
     GPIO_SetMode(PA, BIT10, GPIO_MODE_QUASI); PA->DOUT |= BIT10;
     GPIO_SetMode(PB, BIT5,  GPIO_MODE_QUASI); PB->DOUT |= BIT5;
     GPIO_SetMode(PB, BIT8,  GPIO_MODE_QUASI); PB->DOUT |= BIT8;
     GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); GPIO_DisableInt(PB, 8);
-    
+
     Show_Test_Start_Screen("TK2 Monitor");
-    
-    int rx_count = 0; uint32_t loop_tick = 1000; int power_state = 0; 
-    uint8_t last_tk2_cnt = 0; uint32_t tk2_idle_tick = 0; 
-    
+
+    int rx_count = 0;
+    uint32_t loop_tick = 1000;
+    uint8_t last_tk2_cnt = 0;
+    uint32_t tk2_idle_tick = 0;
+
     static char tk2_str[64];
     strcpy(tk2_str, "WAITING...");
 
-    // [¨¾½u2] ¶i³õ¤j±½°£
+    // [V5.3.19 æ–°å¢] TK2 ç•°å¸¸åµæ¸¬è®Šæ•¸
+    uint32_t tk2_start_time = 0; // è¨˜éŒ„æœ¬æ¬¡æ¥æ”¶é–‹å§‹çš„æ™‚é–“
+    uint32_t tk2_last_activity_time = 0; // è¨˜éŒ„æœ€å¾Œä¸€æ¬¡æ¥æ”¶æ´»å‹•çš„æ™‚é–“
+    bool tk2_receiving_active = false; // æ¨™è¨˜æ˜¯å¦æ­£åœ¨æ¥æ”¶ä¸­
+    uint8_t tk2_expected_length = 0; // é æœŸçš„è³‡æ–™é•·åº¦ (å¯ä»¥æ ¹æ“šèµ·å§‹ç¬¦æˆ–å”è­°è¦å‰‡ä¼°ç®—)
+
+    // [é˜²ç·š2] é€²å ´å¤§æƒé™¤
     TK2Cnt = 0; last_tk2_cnt = 0; tk2_idle_tick = 0; g_u8TK2Step = 0;
     memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
+    // [V5.3.19 æ–°å¢] åˆå§‹åŒ–ç•°å¸¸åµæ¸¬è®Šæ•¸
+    tk2_start_time = g_u32SystemMs;
+    tk2_last_activity_time = g_u32SystemMs;
+    tk2_receiving_active = false;
+    tk2_expected_length = 0; // åˆå§‹æœªçŸ¥
+
 
     while(1) {
-        Global_Background_Tasks(); if (g_force_alarm_menu) break;
-        if (Check_Power_Toggle(&power_state)) {
-            if (power_state) { 
-                PC->DOUT |= BIT7; JigBeep(100); 
-                TK2Cnt = 0; last_tk2_cnt = 0; tk2_idle_tick = 0; g_u8TK2Step = 0; 
-                memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit)); 
-                GPIO_CLR_INT_FLAG(PB, BIT5); 
-                GPIO_EnableInt(PB, 5, GPIO_INT_FALLING);  
-                NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn); 
-            } else { 
-                GPIO_DisableInt(PB, 5); 
-                PC->DOUT &= ~BIT7; JigBeep(500); 
+        Global_Background_Tasks();
+        if (g_force_alarm_menu) break;
+
+        if (Check_Power_Toggle(&ctx)) {
+            if (ctx.power_state) {
+                PC->DOUT |= BIT7;
+                JigBeep(100);
+                TK2Cnt = 0; last_tk2_cnt = 0; tk2_idle_tick = 0; g_u8TK2Step = 0;
+                memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
+                // [V5.3.19 æ–°å¢] é‡ç½® TK2 ç‹€æ…‹æ©Ÿè®Šæ•¸
+                tk2_start_time = g_u32SystemMs;
+                tk2_last_activity_time = g_u32SystemMs;
+                tk2_receiving_active = false;
+                tk2_expected_length = 0;
+                Delay_ms(50); // ç­‰å¾…ç¹¼é›»å™¨æ¥é»èˆ‡æ¥åœ°é›»ä½ç©©å®šï¼Œé¿é–‹åˆ‡æ›ç¬é–“çš„é›œè¨Šçª—å£
+                GPIO_CLR_INT_FLAG(PB, BIT5);
+                GPIO_EnableInt(PB, 5, GPIO_INT_FALLING);
+                NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
+            } else {
+                GPIO_DisableInt(PB, 5);
+                PC->DOUT &= ~BIT7;
+                JigBeep(500);
+                // [V5.3.19 æ–°å¢] ç•¶é›»æºé—œé–‰æ™‚ï¼Œä¹Ÿé‡ç½® TK2 ç‹€æ…‹æ©Ÿè®Šæ•¸
+                tk2_receiving_active = false;
+                tk2_expected_length = 0;
             }
-            Reset_Current_Filter(); loop_tick = 1000;
+            Reset_Current_Filter();
+            loop_tick = 1000;
         }
-        
-        Process_Background_Sampling(&power_state, loop_tick); 
-        if (Check_Reset_Button()) loop_tick = 1000; 
+
+        Process_Background_Sampling(&ctx, g_u32SystemMs);
+        if (Check_Reset_Button()) {
+            loop_tick = 1000;
+            // [V5.3.19 æ–°å¢] æŒ‰ä¸‹é‡ç½®æŒ‰éˆ•æ™‚ï¼Œä¹Ÿé‡ç½® TK2 ç‹€æ…‹æ©Ÿè®Šæ•¸
+            tk2_receiving_active = false;
+            tk2_expected_length = 0;
+        }
         vCheckingTimeOut();
-        
-        if (TK2Cnt > 0) {
-            if (TK2Cnt != last_tk2_cnt) { 
-                last_tk2_cnt = TK2Cnt; tk2_idle_tick = 0; 
-            } else { 
-                tk2_idle_tick++; 
-                if (tk2_idle_tick > 50) { 
-                    // [¨¾½u3] Ãö³¬¤¤Â_¡I¨¾¤î JigBeep ¤Şµo¤G¦¸¨ê¥d¡A®Ú°£ 02/ ²{¶H
-                    NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
-                    
-                    rx_count++; 
-                    Decode_TK2_Raw(tk2_str); 
-                    JigBeep(50); 
-                    loop_tick = 1000; 
-                    
-                    TK2Cnt = 0; last_tk2_cnt = 0; g_u8TK2Step = 0; 
-                    memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit)); 
-                    
-                    GPIO_CLR_INT_FLAG(PB, BIT5);
-                    if(power_state) NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
-                } 
+
+        // [V5.3.19 æ–°å¢] æª¢æŸ¥ TK2 æ¥æ”¶æ˜¯å¦ç•°å¸¸
+        uint32_t current_time = g_u32SystemMs;
+        if (ctx.power_state && tk2_receiving_active) {
+            // 1. æª¢æŸ¥è¶…æ™‚
+            if (current_time - tk2_start_time > TK2_TIMEOUT_MS) {
+                
+                // è§¸ç™¼éŒ¯èª¤è™•ç†
+                // [V5.3.19 æ–°å¢] é‡ç½®ç‹€æ…‹æ©Ÿ
+                TK2Cnt = 0; last_tk2_cnt = 0; g_u8TK2Step = 0;
+                memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
+                tk2_receiving_active = false;
+                tk2_expected_length = 0;
+                tk2_start_time = current_time; // é‡ç½®é–‹å§‹æ™‚é–“
+                tk2_last_activity_time = current_time; // é‡ç½®æ´»å‹•æ™‚é–“
+                // å¯é¸ï¼šç™¼å‡ºè­¦å‘ŠéŸ³æˆ–åœ¨ UI é¡¯ç¤ºéŒ¯èª¤
+                // JigForceBeep(200); // çŸ­ä¿ƒè­¦å‘ŠéŸ³
+            }
+            // 2. æª¢æŸ¥ä½å…ƒæ•¸ (é€™è£¡ç”¨ TK2Cnt ä¾†è¿‘ä¼¼ä½å…ƒæ•¸ï¼Œæ ¹æ“šå”è­°èª¿æ•´é‚è¼¯)
+            else if ((int)TK2Cnt > TK2_MAX_BITS) { // æˆ–è€…æ ¹æ“š tk2_expected_length åˆ¤æ–·
+                
+                 // è§¸ç™¼éŒ¯èª¤è™•ç†
+                 // [V5.3.19 æ–°å¢] é‡ç½®ç‹€æ…‹æ©Ÿ
+                 TK2Cnt = 0; last_tk2_cnt = 0; g_u8TK2Step = 0;
+                 memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
+                 tk2_receiving_active = false;
+                 tk2_expected_length = 0;
+                 tk2_start_time = current_time; // é‡ç½®é–‹å§‹æ™‚é–“
+                 tk2_last_activity_time = current_time; // é‡ç½®æ´»å‹•æ™‚é–“
+                 // å¯é¸ï¼šç™¼å‡ºè­¦å‘ŠéŸ³æˆ–åœ¨ UI é¡¯ç¤ºéŒ¯èª¤
+                 // JigForceBeep(200); // çŸ­ä¿ƒè­¦å‘ŠéŸ³
+            }
+            // 3. æª¢æŸ¥æ¥æ”¶åœæ»¯ (å¦‚æœé•·æ™‚é–“æ²’æœ‰æ–°æ´»å‹•ï¼Œä¹Ÿè¦–ç‚ºè¶…æ™‚)
+            else if (current_time - tk2_last_activity_time > (TK2_TIMEOUT_MS / 2)) { // è¨­å®šä¸€åŠæ™‚é–“ç‚ºåœæ»¯é–¥å€¼
+                 
+                 // è§¸ç™¼éŒ¯èª¤è™•ç†
+                 // [V5.3.19 æ–°å¢] é‡ç½®ç‹€æ…‹æ©Ÿ
+                 TK2Cnt = 0; last_tk2_cnt = 0; g_u8TK2Step = 0;
+                 memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
+                 tk2_receiving_active = false;
+                 tk2_expected_length = 0;
+                 tk2_start_time = current_time; // é‡ç½®é–‹å§‹æ™‚é–“
+                 tk2_last_activity_time = current_time; // é‡ç½®æ´»å‹•æ™‚é–“
+                 // å¯é¸ï¼šç™¼å‡ºè­¦å‘ŠéŸ³æˆ–åœ¨ UI é¡¯ç¤ºéŒ¯èª¤
+                 // JigForceBeep(200); // çŸ­ä¿ƒè­¦å‘ŠéŸ³
             }
         }
-        
+
+
+        if (TK2Cnt > 0) {
+            if (TK2Cnt != last_tk2_cnt) {
+                last_tk2_cnt = TK2Cnt;
+                tk2_idle_tick = 0;
+                // [V5.3.19 æ–°å¢] æ›´æ–°æœ€å¾Œæ´»å‹•æ™‚é–“
+                tk2_last_activity_time = current_time;
+            } else {
+                tk2_idle_tick++;
+                if (tk2_idle_tick > 50) {
+                    // [é˜²ç·š3] é—œé–‰ä¸­æ–·ï¼é˜²æ­¢ JigBeep å¼•ç™¼äºŒæ¬¡åˆ·å¡ï¼Œæ ¹é™¤ 02/ ç¾è±¡
+                    NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
+
+                    rx_count++;
+                    Decode_TK2_Raw(tk2_str);
+                    JigBeep(50);
+                    loop_tick = 1000;
+
+                    // [V5.3.19 æ–°å¢] æ¥æ”¶åˆ°è³‡æ–™å¾Œï¼Œæ¨™è¨˜æ¥æ”¶çµæŸï¼Œé‡ç½®ç‹€æ…‹æ©Ÿè®Šæ•¸
+                    tk2_receiving_active = false;
+                    tk2_expected_length = 0;
+
+                    TK2Cnt = 0; last_tk2_cnt = 0; g_u8TK2Step = 0;
+                    memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
+
+                    GPIO_CLR_INT_FLAG(PB, BIT5);
+                    if(ctx.power_state) NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
+                }
+            }
+        }
+
+        // [V5.3.19 æ–°å¢] æª¢æŸ¥æ˜¯å¦é–‹å§‹æ¥æ”¶ (TK2Cnt > 0 ä¸”ä¹‹å‰æœªåœ¨æ¥æ”¶ä¸­)
+        if (ctx.power_state && TK2Cnt > 0 && !tk2_receiving_active) {
+             tk2_receiving_active = true;
+             tk2_start_time = current_time;
+             tk2_last_activity_time = current_time;
+             // é€™è£¡å¯ä»¥å˜—è©¦ä¼°ç®— tk2_expected_lengthï¼Œä¾‹å¦‚æ ¹æ“šå”è­°è¦å‰‡æˆ–ç¬¬ä¸€æ¬¡æ”¶åˆ°çš„å¹¾å€‹ä½å…ƒ
+             // tk2_expected_length = ... ; // æ ¹æ“šå¯¦éš›å”è­°å¯¦ç¾
+        }
+
+
         if (Check_Exit_Button()) break;
-        
-        if (loop_tick >= 1000) { Update_Dashboard_Display(power_state, rx_count, tk2_str); loop_tick = 0; }
+
+        if (loop_tick >= 1000) {
+            Update_Dashboard_Display(ctx.power_state, rx_count, tk2_str);
+            loop_tick = 0;
+        }
         Delay_ms(1); loop_tick++;
     }
-    PC->DOUT &= ~BIT7; GPIO_DisableInt(PB, 5); UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
+    PC->DOUT &= ~BIT7; GPIO_DisableInt(PB, 5);
+    UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
+
 
 void UART1_JIG_8CP_Test(void) {
     UI_Clear(); Safe_Print_OLED(0, "UART1 JIG_8CP"); Safe_Print_OLED(16, "Red Btn -> TX"); Safe_Print_OLED(32, "Wait RX Cmd:01..."); Safe_Print_OLED(48, "Yellow(Exit)->Back"); UI_Update();
@@ -1424,7 +1712,7 @@ void UART1_JIG_8CP_Test(void) {
 }
 
 // =======================================================
-// [Main ¥Dµ{¦¡]
+// [Main ä¸»ç¨‹å¼]
 // =======================================================
 int main(void) {
     SYS_Init();
@@ -1435,7 +1723,7 @@ int main(void) {
     HID_Init(); NVIC_EnableIRQ(USBD_IRQn); USBD_Start();
     OLED_Force_Reset(); vOLED_INIT(); vINA237_Init(); set237Calibration_1A(); RV3028_Init();
     
-    // Ã¸»s·sªº«öÁä´£¥Ü±Ò°Êµe­±
+    // ç¹ªè£½æ–°çš„æŒ‰éµæç¤ºå•Ÿå‹•ç•«é¢
     UI_Clear(); 
     Safe_Print_OLED(0, "JIG-8FT-P1 (%s) --BALLY--", FIRMWARE_VERSION); 
     Safe_Print_OLED(16, "   |==============Blue: Down"); 
@@ -1445,20 +1733,20 @@ int main(void) {
 
     JigBeep(500); Delay_ms(100); JigBeep(500); 
 
-    // ¨ú¥N Delay_ms(1000)¡A§ï¬°¥d¦b³oÃäµ¥«İ¡u¶À¦âÁä (PF5)¡v«ö¤U
+    // å–ä»£ Delay_ms(1000)ï¼Œæ”¹ç‚ºå¡åœ¨é€™é‚Šç­‰å¾…ã€Œé»ƒè‰²éµ (PF5)ã€æŒ‰ä¸‹
     while(1) {
-        Global_Background_Tasks(); // «O«ù­I´º USB/UART ³q°T¥¿±`¹B§@
+        Global_Background_Tasks(); // ä¿æŒèƒŒæ™¯ USB/UART é€šè¨Šæ­£å¸¸é‹ä½œ
         
-        if ((PF->PIN & BIT5) == 0) { // °»´ú¶À¦âÁä (PF5) ¬O§_«ö¤U
-            Delay_ms(50); // ¨¾¼u¸õ (Debounce)
+        if ((PF->PIN & BIT5) == 0) { // åµæ¸¬é»ƒè‰²éµ (PF5) æ˜¯å¦æŒ‰ä¸‹
+            Delay_ms(50); // é˜²å½ˆè·³ (Debounce)
             if ((PF->PIN & BIT5) == 0) {
-                JigBeep(200); // µo¥Xµu¹GÁn½T»{¤w«ö¤U
-                // µ¥«İ¨Ï¥ÎªÌ©ñ¶}«öÁä
+                JigBeep(200); // ç™¼å‡ºçŸ­é€¼è²ç¢ºèªå·²æŒ‰ä¸‹
+                // ç­‰å¾…ä½¿ç”¨è€…æ”¾é–‹æŒ‰éµ
                 while ((PF->PIN & BIT5) == 0) { 
                     Global_Background_Tasks();
                     Delay_ms(10); 
                 }
-                break; // «öÁä©ñ¶}«á¡A¥´¯}°j°é¶i¤J¤U¤@­Óµe­±
+                break; // æŒ‰éµæ”¾é–‹å¾Œï¼Œæ‰“ç ´è¿´åœˆé€²å…¥ä¸‹ä¸€å€‹ç•«é¢
             }
         }
         Delay_ms(15);
