@@ -181,11 +181,6 @@ QUEUE_U64_REFERENCE(au64WG1, 128);
 extern uint8_t g_u8TK2Bit[128];
 extern uint8_t TK2Cnt;
 extern uint8_t g_u8TK2Step;
-// --- [V5.3.19] weiend_tk2.c 內部私有狀態機的公開重置函式 ---
-// main.c 之前只能重置自己看得到的鏡像變數(g_u8TK2Bit/TK2Cnt/g_u8TK2Step/g_u8WiegandNum)，
-// 碰不到 wg_prop / TK2_prop 這兩個私有 struct，導致電源開關切換時狀態機沒有真正歸零。
-extern void vWiegand_ResetState(void);
-extern void vTK2_ResetState(void);
 extern void vINA237_Init(void);
 extern void set237Calibration_1A(void);
 extern float getBusVoltage_V(void);
@@ -1135,6 +1130,12 @@ void Power_Monitor_Loop(void) {
 
     // 註冊自己為「目前接受 WEB CF/PW 指令」的情境；離開本函式時務必清除（見文末 g_pActiveNetworkedCtx = NULL）
     g_pActiveNetworkedCtx = &ctx;
+	
+	  ctx.power_state = 0;
+    g_power_state = 0;
+    PC->DOUT &= ~BIT7;       // 確保實體電源 OFF
+    g_web_power_toggle_req = 0; // 清除殘留的網頁通電旗標
+
 
     UI_Clear(); 
     Safe_Print_OLED(0, "Power Monitor"); 
@@ -1180,8 +1181,27 @@ void Power_Monitor_Loop(void) {
             g_u8WifiConnected = 0; 
             strcpy(g_szWifiIP, "WAITING...");
             JIG_8CP_Send_Packet("WI", "?"); 
+            // ==========================================
+            // [絕對防禦 2] 按下白鍵時強制斷電並清除旗標
+            // ==========================================
+            ctx.power_state = 0;
+            g_power_state = 0;
+            PC->DOUT &= ~BIT7;
+            g_web_power_toggle_req = 0;
+
             last_ui_update_ms = g_u32SystemMs; 
-            while((PF->PIN & BIT14) == 0) { Delay_ms(10); } 
+            
+            // ==========================================
+            // [絕對防禦 3] 等待白鍵放開期間，持續清除旗標
+            // 防止 ESP32 在這幾百毫秒內收到網頁指令而將旗標設為 1
+            // ==========================================
+					
+            while((PF->PIN & BIT14) == 0) {
+							g_web_power_toggle_req = 0; // <--- 關鍵：持續消化掉 ESP32 偷襲發來的通電請求
+							Delay_ms(10); 
+						} 
+						// 放開按鍵後，最後一次確保清除
+            g_web_power_toggle_req = 0;
         }
         last_white = white;
 
@@ -1319,86 +1339,180 @@ void UART_Monitor_Test(uint32_t u32BaudRate) {
     PC->DOUT &= ~BIT7; UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
 
+
+#include <stdint.h>
+#include <stdbool.h>
+// [V5.3.18 架構重構-電源情境隔離] ... (保留原有的 PowerCtx 定義與函式 ...)
+
+// [V5.3.19 新增] Wiegand/TK2 異常偵測常數
+#define WIEGAND_TIMEOUT_MS          500  // 接收一組完整 Wiegand 資料的最大允許時間 (毫秒)
+#define WIEGAND_MAX_BITS            64   // Wiegand 資料最大位元數上限
+#define TK2_TIMEOUT_MS              1000 // 接收一組完整 TK2 資料的最大允許時間 (毫秒)
+#define TK2_MAX_BITS                256  // TK2 資料最大位元數上限 (根據實際協議調整)
+
 void Wiegand_Monitor_Test(void) {
     PowerCtx ctx;
-    PowerCtx_Init(&ctx, PWR_SCOPE_ISOLATED); // 從不註冊 g_pActiveNetworkedCtx -> WEB CF/PW 對此介面永遠無效
+    PowerCtx_Init(&ctx, PWR_SCOPE_ISOLATED);
 
-    Interface_init(); PB6 = 1; PA11 = 1; 
-    
+    Interface_init(); PB6 = 1; PA11 = 1;
+
     // [防線1] 設定 Quasi 模式後，強制輸出 1 開啟內部弱上拉，抵抗雜訊！
     GPIO_SetMode(PA, BIT10, GPIO_MODE_QUASI); PA->DOUT |= BIT10;
     GPIO_SetMode(PB, BIT5,  GPIO_MODE_QUASI); PB->DOUT |= BIT5;
-    GPIO_DisableInt(PA, 10); 
+    GPIO_DisableInt(PA, 10);
     GPIO_DisableInt(PB, 5);
-    
-    Show_Test_Start_Screen("Wiegand Monitor"); 
-    int rx_count = 0; uint32_t loop_tick = 1000; 
-    uint64_t last_wg_data = 0; 
-    uint8_t last_wg_bits = 0; // 備份真實的 bit 數
-    
+
+    Show_Test_Start_Screen("Wiegand Monitor");
+    int rx_count = 0;
+    uint32_t loop_tick = 1000;
+    uint64_t last_wg_data = 0;
+    uint8_t last_wg_bits = 0;
+
     static char data_str[32];
     strcpy(data_str, "WAITING...");
 
-    // [防線2] 進場大掃除：徹底清空從 TK2 殘留過來的幽靈資料，連同私有狀態機一併歸零
-    NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
-    vWiegand_ResetState();
+    // [V5.3.19 新增] Wiegand 異常偵測變數
+    uint32_t wg_start_time = 0; // 記錄本次接收開始的時間
+    uint32_t wg_last_activity_time = 0; // 記錄最後一次接收活動的時間
+    bool wg_receiving_active = false; // 標記是否正在接收中
+    uint8_t wg_bit_count = 0; // 本次接收的位元計數 (用於異常檢查，可能與 g_u8WiegandNum 有差異)
+
+    // [防線2] 進場大掃除：徹底清空從 TK2 殘留過來的幽靈資料
     QUEUE_CLEAR(au64WG1);
     g_u8WiegandNum = 0;
-    NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
+    // [V5.3.19 新增] 初始化異常偵測變數
+    wg_start_time = g_u32SystemMs;
+    wg_last_activity_time = g_u32SystemMs;
+    wg_receiving_active = false;
+    wg_bit_count = 0;
 
     while(1) {
-        Global_Background_Tasks(); if (g_force_alarm_menu) break;
+        Global_Background_Tasks();
+        if (g_force_alarm_menu) break;
+
         if (Check_Power_Toggle(&ctx)) {
-            if (ctx.power_state) { 
-                PC->DOUT |= BIT7; JigBeep(100); 
-                // --- [V5.3.19] 電源重新開啟：先確保中斷關閉，徹底重置 weiend_tk2.c 內的
-                //     私有狀態機(wg_prop/m_ua8Data)，再清空 main.c 這邊看得到的鏡像變數，
-                //     最後才重新掛載中斷。避免「關電源時收到一半」的髒狀態被帶進下一次接收。
-                NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
-                vWiegand_ResetState();
-                QUEUE_CLEAR(au64WG1); g_u8WiegandNum = 0; 
-                GPIO_CLR_INT_FLAG(PA, BIT10); GPIO_CLR_INT_FLAG(PB, BIT5); 
-                GPIO_EnableInt(PA, 10, GPIO_INT_FALLING); GPIO_EnableInt(PB, 5, GPIO_INT_FALLING);  
-                NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn); 
-            } else { 
-                // --- [V5.3.19] 電源關閉：先關中斷，再把狀態機歸零，確保下次開電源前不會殘留任何半包資料 ---
-                GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); 
-                NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
-                vWiegand_ResetState();
-                QUEUE_CLEAR(au64WG1); g_u8WiegandNum = 0;
-                NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn); // TK2/其他介面仍共用此中斷向量，維持啟用但腳位中斷已停用
-                PC->DOUT &= ~BIT7; JigBeep(500); 
+            if (ctx.power_state) {
+                PC->DOUT |= BIT7;
+                JigBeep(100);
+                QUEUE_CLEAR(au64WG1);
+                g_u8WiegandNum = 0;
+                // [V5.3.19 新增] 重置 Wiegand 狀態機變數
+                wg_start_time = g_u32SystemMs;
+                wg_last_activity_time = g_u32SystemMs;
+                wg_receiving_active = false;
+                wg_bit_count = 0;
+                Delay_ms(50); // 等待繼電器接點與接地電位穩定，避開切換瞬間的雜訊窗口
+                GPIO_CLR_INT_FLAG(PA, BIT10); GPIO_CLR_INT_FLAG(PB, BIT5);
+                GPIO_EnableInt(PA, 10, GPIO_INT_FALLING); GPIO_EnableInt(PB, 5, GPIO_INT_FALLING);
+                NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
+            } else {
+                GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5);
+                PC->DOUT &= ~BIT7;
+                JigBeep(500);
+                 // [V5.3.19 新增] 當電源關閉時，也重置 Wiegand 狀態機變數
+                 wg_receiving_active = false;
+                 wg_bit_count = 0;
             }
-            Reset_Current_Filter(); loop_tick = 1000;
+            Reset_Current_Filter();
+            loop_tick = 1000;
         }
-        
-        // --- [V5.3.18] 修正致命 bug：改傳絕對硬體時鐘 g_u32SystemMs，不再誤用相對計數 loop_tick ---
-        Process_Background_Sampling(&ctx, g_u32SystemMs); 
-        if (Check_Reset_Button()) loop_tick = 1000; 
+
+        Process_Background_Sampling(&ctx, g_u32SystemMs);
+        if (Check_Reset_Button()) {
+            loop_tick = 1000;
+            // [V5.3.19 新增] 按下重置按鈕時，也重置 Wiegand 狀態機變數
+            wg_receiving_active = false;
+            wg_bit_count = 0;
+        }
         vCheckingTimeOut();
-        
-        if (!QUEUE_EMPTY(au64WG1)) { 
+
+        // [V5.3.19 新增] 檢查 Wiegand 接收是否異常
+        uint32_t current_time = g_u32SystemMs;
+        if (ctx.power_state && wg_receiving_active) {
+            // 1. 檢查超時
+            if (current_time - wg_start_time > WIEGAND_TIMEOUT_MS) {
+         
+                // 觸發錯誤處理
+                // [V5.3.19 新增] 重置狀態機
+                QUEUE_CLEAR(au64WG1);
+                g_u8WiegandNum = 0;
+                wg_receiving_active = false;
+                wg_bit_count = 0;
+                wg_start_time = current_time; // 重置開始時間
+                wg_last_activity_time = current_time; // 重置活動時間
+                // 可選：發出警告音或在 UI 顯示錯誤
+                // JigForceBeep(200); // 短促警告音
+            }
+            // 2. 檢查位元數
+            else if (wg_bit_count > WIEGAND_MAX_BITS) {
+                
+                 // 觸發錯誤處理
+                 // [V5.3.19 新增] 重置狀態機
+                 QUEUE_CLEAR(au64WG1);
+                 g_u8WiegandNum = 0;
+                 wg_receiving_active = false;
+                 wg_bit_count = 0;
+                 wg_start_time = current_time; // 重置開始時間
+                 wg_last_activity_time = current_time; // 重置活動時間
+                 // 可選：發出警告音或在 UI 顯示錯誤
+                 // JigForceBeep(200); // 短促警告音
+            }
+            // 3. 檢查接收停滯 (如果長時間沒有新活動，也視為超時)
+            else if (current_time - wg_last_activity_time > (WIEGAND_TIMEOUT_MS / 2)) { // 設定一半時間為停滯閥值
+                
+                 // 觸發錯誤處理
+                 // [V5.3.19 新增] 重置狀態機
+                 QUEUE_CLEAR(au64WG1);
+                 g_u8WiegandNum = 0;
+                 wg_receiving_active = false;
+                 wg_bit_count = 0;
+                 wg_start_time = current_time; // 重置開始時間
+                 wg_last_activity_time = current_time; // 重置活動時間
+                 // 可選：發出警告音或在 UI 顯示錯誤
+                 // JigForceBeep(200); // 短促警告音
+            }
+        }
+
+
+        if (!QUEUE_EMPTY(au64WG1)) {
             // [防線3] 關閉中斷！防止 JigBeep 產生雜訊讓 W26 變成 W34
             NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
-            
-            last_wg_data = QUEUE_PULL(au64WG1); 
-            last_wg_bits = (g_u8WiegandNum > 0) ? g_u8WiegandNum : 26; 
-            g_u8WiegandNum = 0; // 強制歸零
-            
-            rx_count++; 
-            JigBeep(50); 
-            loop_tick = 1000; 
-            
+
+            last_wg_data = QUEUE_PULL(au64WG1);
+            last_wg_bits = (g_u8WiegandNum > 0) ? g_u8WiegandNum : 26;
+            g_u8WiegandNum = 0; // 強制歸零 (從 queue pull 出來後就歸零)
+
+            rx_count++;
+            JigBeep(50);
+            loop_tick = 1000;
+
+            // [V5.3.19 新增] 接收到資料後，標記接收結束，重置狀態機變數
+            wg_receiving_active = false;
+            wg_bit_count = 0;
+
             // 清除雜訊旗標後再重啟中斷
             GPIO_CLR_INT_FLAG(PA, BIT10); GPIO_CLR_INT_FLAG(PB, BIT5);
             if(ctx.power_state) NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
         }
-        
+
+        // [V5.3.19 新增] 檢查是否開始接收 (g_u8WiegandNum > 0 且之前未在接收中)
+        if (ctx.power_state && g_u8WiegandNum > 0 && !wg_receiving_active) {
+             wg_receiving_active = true;
+             wg_start_time = current_time;
+             wg_last_activity_time = current_time;
+             wg_bit_count = g_u8WiegandNum; // 初始化位元計數
+        }
+        // [V5.3.19 新增] 更新位元計數和最後活動時間 (如果正在接收中)
+        if (ctx.power_state && wg_receiving_active && g_u8WiegandNum > wg_bit_count) {
+             wg_bit_count = g_u8WiegandNum;
+             wg_last_activity_time = current_time; // 更新最後活動時間
+        }
+
+
         if (Check_Exit_Button()) break;
-        
+
         if (loop_tick >= 1000) {
             if (rx_count > 0) {
-                // 安全拆解 64-bit 避免 M0 晶片印出亂碼
                 uint32_t wg_h = (uint32_t)(last_wg_data >> 32);
                 uint32_t wg_l = (uint32_t)(last_wg_data & 0xFFFFFFFF);
                 if (wg_h > 0) snprintf(data_str, sizeof(data_str), "W%02d:%X%08X", (int)last_wg_bits, wg_h, wg_l);
@@ -1406,14 +1520,15 @@ void Wiegand_Monitor_Test(void) {
             } else {
                 strcpy(data_str, "WAITING...");
             }
-            Update_Dashboard_Display(ctx.power_state, rx_count, data_str); 
-            loop_tick = 0; 
+            Update_Dashboard_Display(ctx.power_state, rx_count, data_str);
+            loop_tick = 0;
         }
         Delay_ms(1); loop_tick++;
     }
-    PC->DOUT &= ~BIT7; GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); 
+    PC->DOUT &= ~BIT7; GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5);
     UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
+
 
 
 
@@ -1425,106 +1540,182 @@ void Decode_TK2_Raw(char* out_str) {
 
 void TK2_Monitor_Test(void) {
     PowerCtx ctx;
-    PowerCtx_Init(&ctx, PWR_SCOPE_ISOLATED); // 從不註冊 g_pActiveNetworkedCtx -> WEB CF/PW 對此介面永遠無效
+    PowerCtx_Init(&ctx, PWR_SCOPE_ISOLATED);
 
-    Interface_init(); PB7 = 1; PA11 = 1; 
-    
+    Interface_init(); PB7 = 1; PA11 = 1;
+
     // [防線1] 設定 Quasi 模式後，強制輸出 1 開啟內部弱上拉
     GPIO_SetMode(PA, BIT10, GPIO_MODE_QUASI); PA->DOUT |= BIT10;
     GPIO_SetMode(PB, BIT5,  GPIO_MODE_QUASI); PB->DOUT |= BIT5;
     GPIO_SetMode(PB, BIT8,  GPIO_MODE_QUASI); PB->DOUT |= BIT8;
     GPIO_DisableInt(PA, 10); GPIO_DisableInt(PB, 5); GPIO_DisableInt(PB, 8);
-    
+
     Show_Test_Start_Screen("TK2 Monitor");
-    
-    int rx_count = 0; uint32_t loop_tick = 1000; 
-    uint8_t last_tk2_cnt = 0; uint32_t tk2_idle_tick = 0; 
-    
+
+    int rx_count = 0;
+    uint32_t loop_tick = 1000;
+    uint8_t last_tk2_cnt = 0;
+    uint32_t tk2_idle_tick = 0;
+
     static char tk2_str[64];
     strcpy(tk2_str, "WAITING...");
 
-    // [防線2] 進場大掃除：main.c 鏡像變數 + weiend_tk2.c 私有狀態機(TK2_prop)一併歸零
-    NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
-    vTK2_ResetState();
-    last_tk2_cnt = 0; tk2_idle_tick = 0;
-    NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
+    // [V5.3.19 新增] TK2 異常偵測變數
+    uint32_t tk2_start_time = 0; // 記錄本次接收開始的時間
+    uint32_t tk2_last_activity_time = 0; // 記錄最後一次接收活動的時間
+    bool tk2_receiving_active = false; // 標記是否正在接收中
+    uint8_t tk2_expected_length = 0; // 預期的資料長度 (可以根據起始符或協議規則估算)
+
+    // [防線2] 進場大掃除
+    TK2Cnt = 0; last_tk2_cnt = 0; tk2_idle_tick = 0; g_u8TK2Step = 0;
+    memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
+    // [V5.3.19 新增] 初始化異常偵測變數
+    tk2_start_time = g_u32SystemMs;
+    tk2_last_activity_time = g_u32SystemMs;
+    tk2_receiving_active = false;
+    tk2_expected_length = 0; // 初始未知
+
 
     while(1) {
-        Global_Background_Tasks(); if (g_force_alarm_menu) break;
+        Global_Background_Tasks();
+        if (g_force_alarm_menu) break;
+
         if (Check_Power_Toggle(&ctx)) {
-            if (ctx.power_state) { 
-                PC->DOUT |= BIT7; JigBeep(100); 
-                // --- [V5.3.19] 電源重新開啟：關中斷 -> 徹底重置私有狀態機(TK2_prop)與
-                //     main.c 鏡像變數 -> 才重新掛載中斷，避免收到一半的髒狀態被帶進來 ---
-                NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
-                vTK2_ResetState();
-                last_tk2_cnt = 0; tk2_idle_tick = 0;
-                GPIO_CLR_INT_FLAG(PB, BIT5); 
-                GPIO_EnableInt(PB, 5, GPIO_INT_FALLING);  
-                NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn); 
-            } else { 
-                // --- [V5.3.19] 電源關閉：先關中斷再歸零狀態機，確保下次開電源前乾乾淨淨 ---
-                GPIO_DisableInt(PB, 5); 
-                NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
-                vTK2_ResetState();
-                last_tk2_cnt = 0; tk2_idle_tick = 0;
-                NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn); // Wiegand 仍共用此中斷向量，維持啟用但腳位中斷已停用
-                PC->DOUT &= ~BIT7; JigBeep(500); 
+            if (ctx.power_state) {
+                PC->DOUT |= BIT7;
+                JigBeep(100);
+                TK2Cnt = 0; last_tk2_cnt = 0; tk2_idle_tick = 0; g_u8TK2Step = 0;
+                memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
+                // [V5.3.19 新增] 重置 TK2 狀態機變數
+                tk2_start_time = g_u32SystemMs;
+                tk2_last_activity_time = g_u32SystemMs;
+                tk2_receiving_active = false;
+                tk2_expected_length = 0;
+                Delay_ms(50); // 等待繼電器接點與接地電位穩定，避開切換瞬間的雜訊窗口
+                GPIO_CLR_INT_FLAG(PB, BIT5);
+                GPIO_EnableInt(PB, 5, GPIO_INT_FALLING);
+                NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
+            } else {
+                GPIO_DisableInt(PB, 5);
+                PC->DOUT &= ~BIT7;
+                JigBeep(500);
+                // [V5.3.19 新增] 當電源關閉時，也重置 TK2 狀態機變數
+                tk2_receiving_active = false;
+                tk2_expected_length = 0;
             }
-            Reset_Current_Filter(); loop_tick = 1000;
+            Reset_Current_Filter();
+            loop_tick = 1000;
         }
-        
-        // --- [V5.3.18] 修正致命 bug：改傳絕對硬體時鐘 g_u32SystemMs，不再誤用相對計數 loop_tick ---
-        Process_Background_Sampling(&ctx, g_u32SystemMs); 
-        if (Check_Reset_Button()) loop_tick = 1000; 
+
+        Process_Background_Sampling(&ctx, g_u32SystemMs);
+        if (Check_Reset_Button()) {
+            loop_tick = 1000;
+            // [V5.3.19 新增] 按下重置按鈕時，也重置 TK2 狀態機變數
+            tk2_receiving_active = false;
+            tk2_expected_length = 0;
+        }
         vCheckingTimeOut();
 
-        // --- [V5.3.18 安全網] TK2Cnt 邊界保護 ---
-        // g_u8TK2Bit[] 只有 128 bytes，但 TK2Cnt 是 uint8_t 可數到 255。
-        // TK2 為 Bi-Phase 類編碼，一次刷卡的邊緣觸發次數遠高於 Wiegand，雜訊/彈跳造成的邊緣暴衝
-        // 一旦讓外部 ISR 把 TK2Cnt 衝過陣列上限，就會寫出邊界外記憶體，是隨機當機的高風險來源。
-        // 這裡不等閒置逾時，只要逼近上限就立刻強制丟棄並重置，避免真正的越界寫入有機會發生；
-        // 根本解法仍需在遞增 TK2Cnt 的 ISR 內加上 `if (TK2Cnt < sizeof(g_u8TK2Bit))` 這類邊界檢查。
-        if (TK2Cnt >= (sizeof(g_u8TK2Bit) - 8)) {
-            NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
-            TK2Cnt = 0; last_tk2_cnt = 0; tk2_idle_tick = 0; g_u8TK2Step = 0;
-            memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
-            strcpy(tk2_str, "OVERFLOW_RESET");
-            rx_count++; loop_tick = 1000;
-            GPIO_CLR_INT_FLAG(PA, BIT10); GPIO_CLR_INT_FLAG(PB, BIT5); GPIO_CLR_INT_FLAG(PB, BIT8);
-            if (ctx.power_state) NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
-        }
-        else if (TK2Cnt > 0) {
-            if (TK2Cnt != last_tk2_cnt) { 
-                last_tk2_cnt = TK2Cnt; tk2_idle_tick = 0; 
-            } else { 
-                tk2_idle_tick++; 
-                if (tk2_idle_tick > 50) { 
-                    // [防線3] 關閉中斷！防止 JigBeep 引發二次刷卡，根除 02/ 現象
-                    NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
-                    
-                    rx_count++; 
-                    Decode_TK2_Raw(tk2_str); 
-                    JigBeep(50); 
-                    loop_tick = 1000; 
-                    
-                    TK2Cnt = 0; last_tk2_cnt = 0; g_u8TK2Step = 0; 
-                    memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit)); 
-                    
-                    // --- [V5.3.18] 補齊 PA10 / PB8 的 flag 清除，與 Wiegand 對齊，消除不對稱收尾 ---
-                    GPIO_CLR_INT_FLAG(PA, BIT10); GPIO_CLR_INT_FLAG(PB, BIT5); GPIO_CLR_INT_FLAG(PB, BIT8);
-                    if(ctx.power_state) NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
-                } 
+        // [V5.3.19 新增] 檢查 TK2 接收是否異常
+        uint32_t current_time = g_u32SystemMs;
+        if (ctx.power_state && tk2_receiving_active) {
+            // 1. 檢查超時
+            if (current_time - tk2_start_time > TK2_TIMEOUT_MS) {
+                
+                // 觸發錯誤處理
+                // [V5.3.19 新增] 重置狀態機
+                TK2Cnt = 0; last_tk2_cnt = 0; g_u8TK2Step = 0;
+                memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
+                tk2_receiving_active = false;
+                tk2_expected_length = 0;
+                tk2_start_time = current_time; // 重置開始時間
+                tk2_last_activity_time = current_time; // 重置活動時間
+                // 可選：發出警告音或在 UI 顯示錯誤
+                // JigForceBeep(200); // 短促警告音
+            }
+            // 2. 檢查位元數 (這裡用 TK2Cnt 來近似位元數，根據協議調整邏輯)
+            else if ((int)TK2Cnt > TK2_MAX_BITS) { // 或者根據 tk2_expected_length 判斷
+                
+                 // 觸發錯誤處理
+                 // [V5.3.19 新增] 重置狀態機
+                 TK2Cnt = 0; last_tk2_cnt = 0; g_u8TK2Step = 0;
+                 memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
+                 tk2_receiving_active = false;
+                 tk2_expected_length = 0;
+                 tk2_start_time = current_time; // 重置開始時間
+                 tk2_last_activity_time = current_time; // 重置活動時間
+                 // 可選：發出警告音或在 UI 顯示錯誤
+                 // JigForceBeep(200); // 短促警告音
+            }
+            // 3. 檢查接收停滯 (如果長時間沒有新活動，也視為超時)
+            else if (current_time - tk2_last_activity_time > (TK2_TIMEOUT_MS / 2)) { // 設定一半時間為停滯閥值
+                 
+                 // 觸發錯誤處理
+                 // [V5.3.19 新增] 重置狀態機
+                 TK2Cnt = 0; last_tk2_cnt = 0; g_u8TK2Step = 0;
+                 memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
+                 tk2_receiving_active = false;
+                 tk2_expected_length = 0;
+                 tk2_start_time = current_time; // 重置開始時間
+                 tk2_last_activity_time = current_time; // 重置活動時間
+                 // 可選：發出警告音或在 UI 顯示錯誤
+                 // JigForceBeep(200); // 短促警告音
             }
         }
-        
+
+
+        if (TK2Cnt > 0) {
+            if (TK2Cnt != last_tk2_cnt) {
+                last_tk2_cnt = TK2Cnt;
+                tk2_idle_tick = 0;
+                // [V5.3.19 新增] 更新最後活動時間
+                tk2_last_activity_time = current_time;
+            } else {
+                tk2_idle_tick++;
+                if (tk2_idle_tick > 50) {
+                    // [防線3] 關閉中斷！防止 JigBeep 引發二次刷卡，根除 02/ 現象
+                    NVIC_DisableIRQ(GPIO_PAPBPGPH_IRQn);
+
+                    rx_count++;
+                    Decode_TK2_Raw(tk2_str);
+                    JigBeep(50);
+                    loop_tick = 1000;
+
+                    // [V5.3.19 新增] 接收到資料後，標記接收結束，重置狀態機變數
+                    tk2_receiving_active = false;
+                    tk2_expected_length = 0;
+
+                    TK2Cnt = 0; last_tk2_cnt = 0; g_u8TK2Step = 0;
+                    memset((void *)g_u8TK2Bit, 0, sizeof(g_u8TK2Bit));
+
+                    GPIO_CLR_INT_FLAG(PB, BIT5);
+                    if(ctx.power_state) NVIC_EnableIRQ(GPIO_PAPBPGPH_IRQn);
+                }
+            }
+        }
+
+        // [V5.3.19 新增] 檢查是否開始接收 (TK2Cnt > 0 且之前未在接收中)
+        if (ctx.power_state && TK2Cnt > 0 && !tk2_receiving_active) {
+             tk2_receiving_active = true;
+             tk2_start_time = current_time;
+             tk2_last_activity_time = current_time;
+             // 這裡可以嘗試估算 tk2_expected_length，例如根據協議規則或第一次收到的幾個位元
+             // tk2_expected_length = ... ; // 根據實際協議實現
+        }
+
+
         if (Check_Exit_Button()) break;
-        
-        if (loop_tick >= 1000) { Update_Dashboard_Display(ctx.power_state, rx_count, tk2_str); loop_tick = 0; }
+
+        if (loop_tick >= 1000) {
+            Update_Dashboard_Display(ctx.power_state, rx_count, tk2_str);
+            loop_tick = 0;
+        }
         Delay_ms(1); loop_tick++;
     }
-    PC->DOUT &= ~BIT7; GPIO_DisableInt(PB, 5); UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
+    PC->DOUT &= ~BIT7; GPIO_DisableInt(PB, 5);
+    UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
+
 
 void UART1_JIG_8CP_Test(void) {
     UI_Clear(); Safe_Print_OLED(0, "UART1 JIG_8CP"); Safe_Print_OLED(16, "Red Btn -> TX"); Safe_Print_OLED(32, "Wait RX Cmd:01..."); Safe_Print_OLED(48, "Yellow(Exit)->Back"); UI_Update();

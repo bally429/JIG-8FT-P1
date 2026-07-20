@@ -28,6 +28,13 @@
  *        離開 Power Monitor 後該情境物件即隨堆疊銷毀，不會有殘留設定掛在其他介面上。
  *     3. 修正 Wiegand/TK2 呼叫 Process_Background_Sampling 誤傳 loop_tick(相對計數) 而非
  *        g_u32SystemMs(絕對硬體時鐘) 的超載計時失準問題。
+ * V5.3.19 (2026/07/20): [電源安全邏輯重構與時序防護]
+ *   1. 根除幽靈通電 Bug：在 Power_Monitor_Loop 進入點及白色按鈕（WIFI IP 取得）處理區間，
+ *      強制重置 g_web_power_toggle_req 旗標並切斷實體繼電器 (PC7)，確保系統絕不會因殘留網頁指令或 ESP32 背景同步而意外自動通電。
+ *   2. 建立動態防火牆機制：在等待白色按鈕放開的阻塞迴圈 (while) 中，加入持續清除網頁通電請求的邏輯，
+ *      有效抵禦 UART 中斷在毫秒級時間差內的「偷襲式」通電指令。
+ *   3. 強化狀態隔離：嚴格落實 V5.3.18 的 PowerCtx 架構，
+ *      確保 PWR_SCOPE_NETWORKED 情境下的電源控制權完全收歸於使用者手動操作（紅鍵或網頁點擊），杜絕任何非預期的自動化行為。
  * ===========================================================================================
  */
 
@@ -43,7 +50,7 @@
 // =======================================================
 // [系統版本控制]
 // =======================================================
-#define FIRMWARE_VERSION "V5.3.18"
+#define FIRMWARE_VERSION "V5.3.19"
 
 // =======================================================
 // [系統全域設定與變數]
@@ -1130,6 +1137,12 @@ void Power_Monitor_Loop(void) {
 
     // 註冊自己為「目前接受 WEB CF/PW 指令」的情境；離開本函式時務必清除（見文末 g_pActiveNetworkedCtx = NULL）
     g_pActiveNetworkedCtx = &ctx;
+	
+	  ctx.power_state = 0;
+    g_power_state = 0;
+    PC->DOUT &= ~BIT7;       // 確保實體電源 OFF
+    g_web_power_toggle_req = 0; // 清除殘留的網頁通電旗標
+
 
     UI_Clear(); 
     Safe_Print_OLED(0, "Power Monitor"); 
@@ -1175,8 +1188,27 @@ void Power_Monitor_Loop(void) {
             g_u8WifiConnected = 0; 
             strcpy(g_szWifiIP, "WAITING...");
             JIG_8CP_Send_Packet("WI", "?"); 
+            // ==========================================
+            // [絕對防禦 2] 按下白鍵時強制斷電並清除旗標
+            // ==========================================
+            ctx.power_state = 0;
+            g_power_state = 0;
+            PC->DOUT &= ~BIT7;
+            g_web_power_toggle_req = 0;
+
             last_ui_update_ms = g_u32SystemMs; 
-            while((PF->PIN & BIT14) == 0) { Delay_ms(10); } 
+            
+            // ==========================================
+            // [絕對防禦 3] 等待白鍵放開期間，持續清除旗標
+            // 防止 ESP32 在這幾百毫秒內收到網頁指令而將旗標設為 1
+            // ==========================================
+					
+            while((PF->PIN & BIT14) == 0) {
+							g_web_power_toggle_req = 0; // <--- 關鍵：持續消化掉 ESP32 偷襲發來的通電請求
+							Delay_ms(10); 
+						} 
+						// 放開按鍵後，最後一次確保清除
+            g_web_power_toggle_req = 0;
         }
         last_white = white;
 
