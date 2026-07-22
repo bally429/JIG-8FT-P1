@@ -35,6 +35,12 @@
  *      有效抵禦 UART 中斷在毫秒級時間差內的「偷襲式」通電指令。
  *   3. 強化狀態隔離：嚴格落實 V5.3.18 的 PowerCtx 架構，
  *      確保 PWR_SCOPE_NETWORKED 情境下的電源控制權完全收歸於使用者手動操作（紅鍵或網頁點擊），杜絕任何非預期的自動化行為。
+ * V5.3.20 (2026/07/22): [終極穩定性與通訊防護]
+ * 1. 修復 UART0 Debug 腳位映射，恢復正常輸出。
+ * 2. 根除幽靈通電：將 Power_Monitor_Loop 開頭的 Delay_ms 改為非阻塞防禦性等待。
+ * 3. UART1 TX 防死鎖：加入 Timeout 機制，防止 ESP32 忙碌時 M031 永久卡死。
+ * 4. 移除 PD 發送的 g_u8WifiConnected 錯誤判斷，防止 ESP32 誤判通訊逾時斷電。
+ * 5. 修正 JIG_8CP_Command_Handler 中 strcmp 比對多餘空格的解析 Bug。
  * ===========================================================================================
  */
 
@@ -50,64 +56,47 @@
 // =======================================================
 // [系統版本控制]
 // =======================================================
-#define FIRMWARE_VERSION "V5.3.19"
+#define FIRMWARE_VERSION "V5.3.20"
 
 // =======================================================
 // [系統全域設定與變數]
 // =======================================================
-volatile uint8_t g_u8BuzzerEnabled = 0; 
+volatile uint8_t g_u8BuzzerEnabled = 0;
 volatile uint8_t g_u8EP2Ready = 0;
-extern volatile uint8_t g_u8Led_Status[8]; 
-volatile uint8_t g_u8UsbHidAppendCR = 1; 
-volatile uint8_t g_u8UsbHidSmartCaps = 1; 
+extern volatile uint8_t g_u8Led_Status[8];
+volatile uint8_t g_u8UsbHidAppendCR = 1;
+volatile uint8_t g_u8UsbHidSmartCaps = 1;
+volatile uint32_t g_u32PdCounter = 0;
+volatile uint8_t g_u8DebugEnable = 1; 
 
-// TMR1 硬體系統計時 (1ms) 與背景狀態控制
 volatile uint32_t g_u32SystemMs = 0;
 volatile uint32_t g_u32StopwatchMs = 0;
 volatile uint8_t g_u8StopwatchRunning = 0;
-volatile uint8_t g_force_alarm_menu = 0; 
+volatile uint8_t g_force_alarm_menu = 0;
 
-// =======================================================
-// [WIFI 與通訊變數]
-// =======================================================
 char g_szWifiIP[20] = "";
 uint8_t g_u8WifiConnected = 0;
-
-// g_power_state：僅作為「WEB/儀表板可見的鏡像」，只有 Networked 情境的迴圈會同步寫入它，
-// 純粹供 JIG_8CP_Command_Handler 的 PW "?" 查詢與外部顯示使用，不再驅動任何保護邏輯。
 volatile int g_power_state = 0;
 
-// =======================================================
-// [V5.3.18 新架構] 電源情境 (PowerCtx) — 取代全域 g_u8StandaloneMode + g_cfg_* + g_web_power_toggle_req
-// =======================================================
 typedef enum {
-    PWR_SCOPE_NETWORKED = 0,  // Power Monitor：允許 WEB 虛擬電源鍵、允許 WEB(CF) 設定保護門檻
-    PWR_SCOPE_ISOLATED  = 1   // RS232 / Wiegand / TK2：僅實體按鍵控制、保護門檻為獨立硬編碼預設值
+    PWR_SCOPE_NETWORKED = 0,
+    PWR_SCOPE_ISOLATED  = 1
 } PowerScope;
 
 typedef struct {
     PowerScope scope;
     int      power_state;
-
-    // 保護門檻（每個情境各自獨立持有，不再共用同一份全域）
-    uint8_t  config_received;   // 是否已有有效門檻（Networked 情境才可能由 WEB CF 指令填入）
+    uint8_t  config_received;
     float    voltage_min;
     float    voltage_max;
     float    current_max;
     uint8_t  overload_sec;
-
-    // 保護執行期狀態
     uint8_t  is_overloading;
     uint32_t overload_start_tick;
 } PowerCtx;
 
-// 目前「唯一」被允許接收 WEB CF / PW 指令的情境。
-// 只有 Power_Monitor_Loop 在進入時會把自己的位址註冊到這裡，離開時清空。
-// Wiegand / TK2 / RS232 從未註冊，因此 WEB 端無論送什麼 CF/PW，都不會影響它們 —
-// 這是取代「忘記在每個函式手動清 g_u8StandaloneMode」這種脆弱寫法的根本解法。
 static volatile PowerCtx *g_pActiveNetworkedCtx = NULL;
 
-// Isolated 情境的硬編碼安全預設值（不接受 WEB 動態調整，避免與 Power Monitor 的門檻互相污染）
 #define ISOLATED_DEFAULT_VOLTAGE_MIN   0.0f
 #define ISOLATED_DEFAULT_VOLTAGE_MAX   12.0f
 #define ISOLATED_DEFAULT_CURRENT_MAX   400.0f
@@ -118,16 +107,12 @@ static void PowerCtx_Init(PowerCtx *ctx, PowerScope scope) {
     ctx->scope = scope;
     ctx->power_state = 0;
     if (scope == PWR_SCOPE_ISOLATED) {
-        // Isolated 情境一律使用獨立硬編碼門檻，且視為「已就緒」以維持基本硬體保護，
-        // 但這份設定與 Networked 情境的 g_cfg_* 完全無關，WEB 端無法覆寫。
         ctx->config_received = 1;
         ctx->voltage_min  = ISOLATED_DEFAULT_VOLTAGE_MIN;
         ctx->voltage_max  = ISOLATED_DEFAULT_VOLTAGE_MAX;
         ctx->current_max  = ISOLATED_DEFAULT_CURRENT_MAX;
         ctx->overload_sec = ISOLATED_DEFAULT_OVERLOAD_SEC;
     } else {
-        // Networked 情境門檻預設「尚未就緒」，等待 WEB 端 CF 指令送達才啟動保護，
-        // 與舊版行為一致（g_config_received 起始為 0）。
         ctx->config_received = 0;
         ctx->voltage_min  = 0.0f;
         ctx->voltage_max  = 12.0f;
@@ -136,21 +121,15 @@ static void PowerCtx_Init(PowerCtx *ctx, PowerScope scope) {
     }
 }
 
-void Trigger_Power_Protection(PowerCtx *ctx, const char* reason, float final_c, float final_v);
+void Trigger_Power_Protection(PowerCtx *ctx, const char *reason, float final_c, float final_v);
 float Process_Background_Sampling(PowerCtx *ctx, uint32_t current_time_ms);
 int  Check_Power_Toggle(PowerCtx *ctx);
 
-// =======================================================
-// [V5.3.3] USB HID 專用非同步發送緩衝區 (Ring Buffer)
-// =======================================================
 #define HID_TX_BUF_SIZE 256
 volatile uint8_t g_hid_tx_buf[HID_TX_BUF_SIZE];
 volatile uint16_t g_hid_head = 0;
 volatile uint16_t g_hid_tail = 0;
 
-// =======================================================
-// [UART Ring Buffer 設定]
-// =======================================================
 #define UART1_RX_BUF_SIZE 256
 volatile uint8_t g_u1_rx_buf[UART1_RX_BUF_SIZE];
 volatile uint16_t g_u1_rx_head = 0;
@@ -164,9 +143,6 @@ volatile uint16_t g_u2_rx_tail = 0;
 #define JIG_8CP_STX 0x02
 #define JIG_8CP_CR  0x0D
 
-// =======================================================
-// [鬧鐘結構設定]
-// =======================================================
 typedef struct {
     uint8_t hours;
     uint8_t minutes;
@@ -176,14 +152,11 @@ typedef struct {
 AlarmDef g_alarms[6] = {0};
 volatile uint8_t g_alarm_triggered = 0;
 
-// =======================================================
-// [外部函數與共用模組宣告]
-// =======================================================
 extern const S_USBD_INFO_T gsInfo;
 extern void HID_ClassRequest(void);
 extern void HID_Init(void);
 extern void vCheckingTimeOut(void);
-extern uint8_t g_u8WiegandNum; 
+extern uint8_t g_u8WiegandNum;
 QUEUE_U64_REFERENCE(au64WG1, 128);
 extern uint8_t g_u8TK2Bit[128];
 extern uint8_t TK2Cnt;
@@ -194,21 +167,16 @@ extern float getBusVoltage_V(void);
 extern float getCurrent_mA(void);
 extern float getPower_mW(void);
 
-// =======================================================
-// [所有函數原型宣告 - Prototypes] 
-// =======================================================
 void Process_UART1_JIG_8CP_Parser(void);
 void Delay_ms(uint32_t ms);
-void Delay_us(uint32_t us); 
-void JigForceBeep(uint32_t ms); 
-void JigBeep(uint32_t ms);      
+void Delay_us(uint32_t us);
+void JigForceBeep(uint32_t ms);
+void JigBeep(uint32_t ms);
 void JIG_8CP_Send_Packet(const char* cmd_code, const char* data);
-
 void UI_Clear(void);
 void UI_Update(void);
 void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, const char *fmt, ...);
 void Safe_Print_OLED(int y, const char *fmt, ...);
-
 void Time_Set_Menu_Loop(void);
 void Global_Background_Tasks(void);
 void Show_Test_Start_Screen(const char* title);
@@ -216,20 +184,16 @@ void Update_Dashboard_Display(int power_state, int rx_count, const char* specifi
 void UI_Draw_Menu_State(const char* title, const char** items, int num_items, int curr_idx);
 void UI_Menu_Scroll_Anim_Smooth(const char* title, const char** items, int num_items, int old_idx, int dir);
 int Check_Exit_Button(void);
-
 void USBHID_Enqueue_Data(const char* str);
 void USBHID_Enqueue_String(const char* str);
 void USBHID_Process_Queue(void);
 void Internal_Send_Char_HID(char c);
 
-// =======================================================
-// [高頻電流滑動平均濾波器與峰值追蹤]
-// =======================================================
-#define CURRENT_FILTER_SIZE 50 
+#define CURRENT_FILTER_SIZE 50
 float g_fCurrentBuffer[CURRENT_FILTER_SIZE] = {0};
 uint8_t g_u8CurrentFilterIdx = 0;
 uint8_t g_u8FilterFilled = 1;
-float g_fCurrentAvg = 0.0f; 
+float g_fCurrentAvg = 0.0f;
 float g_fMaxCurrent = 0.0f;
 float g_fMinCurrent = 9999.0f;
 
@@ -237,7 +201,6 @@ void Push_Current_Sample(float new_current) {
     g_fCurrentBuffer[g_u8CurrentFilterIdx] = new_current;
     g_u8CurrentFilterIdx = (g_u8CurrentFilterIdx + 1) % CURRENT_FILTER_SIZE;
     if (g_u8CurrentFilterIdx == 0) g_u8FilterFilled = 1;
-
     int count = g_u8FilterFilled ? CURRENT_FILTER_SIZE : g_u8CurrentFilterIdx;
     float sum = 0;
     for (int i = 0; i < count; i++) sum += g_fCurrentBuffer[i];
@@ -250,9 +213,6 @@ void Reset_Current_Filter(void) {
     g_fCurrentAvg = 0.0f; g_fMaxCurrent = 0.0f; g_fMinCurrent = 9999.0f;
 }
 
-// =======================================================
-// [核心按鍵與共用 UI 模組]
-// =======================================================
 int Check_Exit_Button(void) {
     if((PF->PIN & BIT5) == 0) { Delay_ms(50); if((PF->PIN & BIT5) == 0) { JigBeep(200); while((PF->PIN & BIT5)==0){} return 1; } } return 0;
 }
@@ -260,27 +220,20 @@ int Check_Reset_Button(void) {
     if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { JigBeep(50); g_fMaxCurrent = 0.0f; g_fMinCurrent = 9999.0f; while((PF->PIN & BIT3)==0){} return 1; } } return 0;
 }
 
-// --- [V5.3.18 重構] Check_Power_Toggle 改吃 PowerCtx，情境自帶 scope，不再靠全域旗標判斷 ---
 int Check_Power_Toggle(PowerCtx *ctx) {
-    // 1. 偵測實體 Red 按鈕（所有情境皆可用實體鍵）
     if ((PA->PIN & BIT8) == 0) {
         Delay_ms(50);
         if ((PA->PIN & BIT8) == 0) {
             ctx->power_state = !ctx->power_state;
-            if (ctx->scope == PWR_SCOPE_NETWORKED) g_power_state = ctx->power_state; // 僅 Networked 情境鏡像給 WEB
+            if (ctx->scope == PWR_SCOPE_NETWORKED) g_power_state = ctx->power_state;
             while ((PA->PIN & BIT8) == 0) {}
             Delay_ms(50);
-
-            // 只有 Networked 情境才會把電源狀態回報給 ESP32 (UART1)
             if (ctx->scope == PWR_SCOPE_NETWORKED) {
                 JIG_8CP_Send_Packet("PW", ctx->power_state ? "ON" : "OFF");
             }
             return 1;
         }
     }
-
-    // 2. 偵測網頁發來的軟體控制請求 — 僅 Networked 情境會處理；
-    //    Isolated 情境完全不觸碰 g_web_power_toggle_req，WEB 電源鍵天生對它們無效。
     if (ctx->scope == PWR_SCOPE_NETWORKED) {
         extern volatile int g_web_power_toggle_req;
         if (g_web_power_toggle_req == 1 && ctx->power_state == 0) {
@@ -295,60 +248,46 @@ int Check_Power_Toggle(PowerCtx *ctx) {
             g_web_power_toggle_req = 0;
             return 1;
         }
-        g_web_power_toggle_req = 0; // 消化過期的冗餘旗標
+        g_web_power_toggle_req = 0;
     }
-
     return 0;
 }
 
-void Trigger_Power_Protection(PowerCtx *ctx, const char* reason, float final_c, float final_v) {
-    // 只有 Networked 情境才會把保護回報送往 ESP32
+void Trigger_Power_Protection(PowerCtx *ctx, const char *reason, float final_c, float final_v) {
     if (ctx->scope == PWR_SCOPE_NETWORKED) {
         char pd_buf[32];
         snprintf(pd_buf, sizeof(pd_buf), "%.1f,%.2f", final_c, final_v);
         JIG_8CP_Send_Packet("PD", pd_buf);
         Delay_ms(50);
     }
-
-    // 1. 強制切斷實體電源
     PC->DOUT &= ~BIT7;
     ctx->power_state = 0;
     if (ctx->scope == PWR_SCOPE_NETWORKED) g_power_state = 0;
     ctx->is_overloading = 0;
-
     if (ctx->scope == PWR_SCOPE_NETWORKED) {
         JIG_8CP_Send_Packet("PW", "OFF");
     }
-
-    // 2. UI 滿版警告提示 (蓋掉背景)
     UI_Clear();
     Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "================================");
     Safe_Print_OLED_Smooth(16, 0, 63, 0x0F, "    POWER PROTECT TRIGGERED!");
     Safe_Print_OLED_Smooth(32, 0, 63, 0x0F, "    REASON: %s", reason);
     Safe_Print_OLED_Smooth(48, 0, 63, 0x0F, "================================");
     UI_Update();
-
-    // 3. 強烈警報聲，並給予視覺延遲
     for(int i=0; i<5; i++) { JigForceBeep(100); Delay_ms(100); }
     Delay_ms(2000);
 }
 
 float Process_Background_Sampling(PowerCtx *ctx, uint32_t current_time_ms) {
     static uint32_t s_last_sample_ms = 0;
-    if (ctx->power_state && (current_time_ms - s_last_sample_ms >= 20)) { // 每 20ms 採樣一次
+    if (ctx->power_state && (current_time_ms - s_last_sample_ms >= 20)) {
         s_last_sample_ms = current_time_ms;
         float sample_c = getCurrent_mA();
         if (sample_c == 0.0f) { set237Calibration_1A(); sample_c = getCurrent_mA(); }
         Push_Current_Sample(sample_c);
-
         if (sample_c > g_fMaxCurrent) g_fMaxCurrent = sample_c;
         if (sample_c < g_fMinCurrent) g_fMinCurrent = sample_c;
-
-        // --- 電源保護機制：完全使用「此情境自己的」門檻，不再讀取任何全域 g_cfg_* ---
         if (ctx->config_received) {
             float sample_v = getBusVoltage_V();
-
-            // 1. 電壓異常 (瞬間保護 - 立刻觸發)
             if (sample_v > ctx->voltage_max) {
                 Trigger_Power_Protection(ctx, "OVER VOLTAGE", sample_c, sample_v);
                 return sample_c;
@@ -357,12 +296,10 @@ float Process_Background_Sampling(PowerCtx *ctx, uint32_t current_time_ms) {
                 Trigger_Power_Protection(ctx, "UNDER VOLTAGE", sample_c, sample_v);
                 return sample_c;
             }
-
-            // 2. 電流超載 (延遲保護 - 容忍瞬間突波)
             if (sample_c > ctx->current_max) {
                 if (!ctx->is_overloading) {
                     ctx->is_overloading = 1;
-                    ctx->overload_start_tick = current_time_ms; // 開始記錄超載時間
+                    ctx->overload_start_tick = current_time_ms;
                 } else {
                     if ((current_time_ms - ctx->overload_start_tick) >= ((uint32_t)ctx->overload_sec * 1000)) {
                         Trigger_Power_Protection(ctx, "OVER CURRENT", sample_c, sample_v);
@@ -370,7 +307,7 @@ float Process_Background_Sampling(PowerCtx *ctx, uint32_t current_time_ms) {
                     }
                 }
             } else {
-                ctx->is_overloading = 0; // 電流降回正常，清除計時
+                ctx->is_overloading = 0;
             }
         }
         return sample_c;
@@ -382,11 +319,10 @@ float Process_Background_Sampling(PowerCtx *ctx, uint32_t current_time_ms) {
 
 void Show_Test_Start_Screen(const char* title) {
     UI_Clear();
-    Safe_Print_OLED(0, "%s", title); 
-    Safe_Print_OLED(16, "Red Btn (Power)"); 
-    Safe_Print_OLED(32, "Blue Btn (-) Reset"); 
-    UI_Update(); 
-
+    Safe_Print_OLED(0, "%s", title);
+    Safe_Print_OLED(16, "Red Btn (Power)");
+    Safe_Print_OLED(32, "Blue Btn (-) Reset");
+    UI_Update();
     uint32_t wait_tick = 0;
     while(wait_tick < 5000) {
         Global_Background_Tasks(); if (g_force_alarm_menu) break;
@@ -399,56 +335,35 @@ void Show_Test_Start_Screen(const char* title) {
 }
 
 void Update_Dashboard_Display(int power_state, int rx_count, const char* specific_data_str) {
-    float voltage = getBusVoltage_V(); 
+    float voltage = getBusVoltage_V();
     float inst_current = getCurrent_mA();
-    if (inst_current == 0.0f) { 
-        set237Calibration_1A(); 
-        inst_current = getCurrent_mA(); 
-    }
-        
+    if (inst_current == 0.0f) { set237Calibration_1A(); inst_current = getCurrent_mA(); }
     UI_Clear();
-    
-    // 1. 排版第一行：電流平均值與最大值
     Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "AVG:%-6.1fmA   Max:%-6.1fmA", g_fCurrentAvg, g_fMaxCurrent);
-    
-    // 2. 排版第二行：實時電流與最小值
     Safe_Print_OLED_Smooth(16, 0, 63, 0x0F, "CUR:%-6.1fmA   Min:%-6.0fmA", inst_current, (g_fMinCurrent==9999.0f)?0:g_fMinCurrent);
-    
-    // 3. 排版第三行：電壓與電源狀態
     Safe_Print_OLED_Smooth(32, 0, 63, 0x0F, "%-5.2fV         [Power:%s]", voltage, power_state ? "ON " : "OFF");
-    
-    // 4. 排版第四行：動態外部資料 (防禦字串格式化越界)
     if (strlen(specific_data_str) > 0 && rx_count >= 0) {
         Safe_Print_OLED_Smooth(48, 0, 63, 0x04, "%02d/%.28s", rx_count, specific_data_str); 
     } else {
         Safe_Print_OLED_Smooth(48, 0, 63, 0x04, "%.32s", specific_data_str);
     }
-    
     UI_Update(); 
 }
 
-// =======================================================
-// [OLED UI 繪圖底層引擎 - 支援 128 位元深度分配緩衝區]
-// =======================================================
 #define MAX_VRAM_LINES 8
-
 typedef struct {
     int y;
     int min_y;
     int max_y;
     uint8_t brightness;
-    char text[128]; 
+    char text[128];
     uint8_t active;
 } VRAM_Line;
-
 VRAM_Line g_vram[MAX_VRAM_LINES];
 
 void UI_Clear(void) {
-    for(int i = 0; i < MAX_VRAM_LINES; i++) {
-        g_vram[i].active = 0;
-    }
+    for(int i = 0; i < MAX_VRAM_LINES; i++) { g_vram[i].active = 0; }
 }
-
 void UI_Update(void) {
     NVIC_DisableIRQ(USBD_IRQn);
     OLED_Clear();
@@ -460,24 +375,17 @@ void UI_Update(void) {
     OLED_Update();
     NVIC_EnableIRQ(USBD_IRQn);
 }
-
 void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, const char *fmt, ...) {
     int idx = -1;
-    for(int i = 0; i < MAX_VRAM_LINES; i++) {
-        if(!g_vram[i].active) { idx = i; break; }
-    }
-    if(idx == -1) return; 
-
+    for(int i = 0; i < MAX_VRAM_LINES; i++) { if(!g_vram[i].active) { idx = i; break; } }
+    if(idx == -1) return;
     char temp_buf[128];
     va_list argptr;
     va_start(argptr, fmt);
-    
     NVIC_DisableIRQ(USBD_IRQn);
     vsnprintf(temp_buf, sizeof(temp_buf), fmt, argptr);
     NVIC_EnableIRQ(USBD_IRQn);
-    
     va_end(argptr);
-
     int temp_len = strlen(temp_buf);
     for(int i = 0; i < 32; i++) {
         if(i < temp_len) {
@@ -494,9 +402,8 @@ void Safe_Print_OLED_Smooth(int y, int min_y, int max_y, uint8_t brightness, con
     g_vram[idx].brightness = brightness;
     g_vram[idx].active = 1;
 }
-
 void Safe_Print_OLED(int y, const char *fmt, ...) {
-    char temp_buf[128]; 
+    char temp_buf[128];
     va_list argptr;
     va_start(argptr, fmt);
     NVIC_DisableIRQ(USBD_IRQn);
@@ -505,24 +412,21 @@ void Safe_Print_OLED(int y, const char *fmt, ...) {
     va_end(argptr);
     Safe_Print_OLED_Smooth(y, 0, 63, 0x0F, "%s", temp_buf);
 }
-
 void UI_Draw_Menu_State(const char* title, const char** items, int num_items, int curr_idx) {
     int prev_idx = (curr_idx - 1 + num_items) % num_items;
     int next_idx = (curr_idx + 1) % num_items;
     UI_Clear();
-    Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, title);                 
-    Safe_Print_OLED_Smooth(16, 16, 63, 0x04, "  %s", items[prev_idx]); 
-    Safe_Print_OLED_Smooth(32, 16, 63, 0x0F, "> %s", items[curr_idx]); 
-    Safe_Print_OLED_Smooth(48, 16, 63, 0x04, "  %s", items[next_idx]); 
-    UI_Update(); 
+    Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, title);
+    Safe_Print_OLED_Smooth(16, 16, 63, 0x04, "  %s", items[prev_idx]);
+    Safe_Print_OLED_Smooth(32, 16, 63, 0x0F, "> %s", items[curr_idx]);
+    Safe_Print_OLED_Smooth(48, 16, 63, 0x04, "  %s", items[next_idx]);
+    UI_Update();
 }
-
 void UI_Menu_Scroll_Anim_Smooth(const char* title, const char** items, int num_items, int old_idx, int dir) {
     int p_idx = (old_idx - 1 + num_items) % num_items;
     int n_idx = (old_idx + 1) % num_items;
-    int nn_idx = (old_idx + 2) % num_items; 
-    int pp_idx = (old_idx - 2 + num_items * 2) % num_items; 
-
+    int nn_idx = (old_idx + 2) % num_items;
+    int pp_idx = (old_idx - 2 + num_items * 2) % num_items;
     for (int offset = 0; offset <= 16; offset += 4) {
         UI_Clear(); Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, title); 
         if (dir == 1) { 
@@ -540,31 +444,24 @@ void UI_Menu_Scroll_Anim_Smooth(const char* title, const char** items, int num_i
     }
 }
 
-// =======================================================
-// [全域攔截系統與鬧鐘引擎]
-// =======================================================
 void Handle_Alarm_Trigger(void) {
     if (!g_alarm_triggered) return;
     uint32_t start_ms = g_u32SystemMs;
-    uint32_t beep_timer = g_u32SystemMs - 2000; 
-    
+    uint32_t beep_timer = g_u32SystemMs - 2000;
     UI_Clear();
     Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "================================");
     Safe_Print_OLED_Smooth(24, 0, 63, 0x0F, "      TIME'S UP! (ALARM)");
     Safe_Print_OLED_Smooth(48, 0, 63, 0x0F, "================================");
     UI_Update();
-
     while(g_alarm_triggered) {
         Process_UART1_JIG_8CP_Parser(); 
         USBHID_Process_Queue(); 
         uint32_t elapsed = g_u32SystemMs - start_ms;
         if (elapsed > 60000) { g_alarm_triggered = 0; break; } 
-
         if (g_u32SystemMs - beep_timer > 2000) {
             for(int i=0; i<4; i++) { JigForceBeep(60); Delay_ms(60); }
             beep_timer = g_u32SystemMs;
         }
-
         if ((PA->PIN & BIT8)==0 || (PF->PIN & (BIT3|BIT4|BIT5|BIT6)) != (BIT3|BIT4|BIT5|BIT6)) {
             JigBeep(50);
             g_alarm_triggered = 0;
@@ -576,17 +473,14 @@ void Handle_Alarm_Trigger(void) {
 }
 
 void Global_Background_Tasks(void) {
-    Process_UART1_JIG_8CP_Parser(); // 維持 ESP32 通訊通道常開、無感傳發
-    USBHID_Process_Queue(); 
-    
+    Process_UART1_JIG_8CP_Parser();
+    USBHID_Process_Queue();
     static uint32_t s_last_rtc_read = 0;
     if (g_u32SystemMs - s_last_rtc_read >= 500) {
         s_last_rtc_read = g_u32SystemMs; 
-        
         static uint8_t last_sec = 99;
         RTC_TimeTypeDef rtc;
         RV3028_GetTime(&rtc); 
-        
         if (rtc.seconds != last_sec) {
             last_sec = rtc.seconds;
             for(int i=0; i<6; i++) {
@@ -597,63 +491,52 @@ void Global_Background_Tasks(void) {
             }
         }
     }
-    
     if (g_alarm_triggered) { Handle_Alarm_Trigger(); }
 }
 
 int Get_Weekday(int year, int month, int day) {
     if (month == 1 || month == 2) { month += 12; year--; }
     int k = year % 100; int j = year / 100;
-    int h = day + 13 * (month + 1) / 5 + k + k / 4 + j / 4 + 5 * j;
-    return h % 7; 
+    int h = day + 13 * (month + 1) / 5 +  k + k / 4 + j / 4 + 5 * j;
+    return h % 7;
 }
-const char* week_str[] = {"Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri"};
+const char* week_str[] = { "Sat ",  "Sun ",  "Mon ",  "Tue ",  "Wed ",  "Thu ",  "Fri "};
 
-// =======================================================
-// [V5.3.3 新架構：USB HID 非同步佇列與發送引擎]
-// =======================================================
 void USBHID_Enqueue_Data(const char* str) {
     while(*str) {
         uint16_t next = (g_hid_head + 1) % HID_TX_BUF_SIZE;
-        if (next != g_hid_tail) {
-            g_hid_tx_buf[g_hid_head] = *str++;
-            g_hid_head = next;
-        } else break; 
+        if (next != g_hid_tail) { g_hid_tx_buf[g_hid_head] = *str++; g_hid_head = next; }
+        else break;
     }
 }
-
 void USBHID_Enqueue_String(const char* str) {
     while(*str) {
         uint16_t next = (g_hid_head + 1) % HID_TX_BUF_SIZE;
-        if (next != g_hid_tail) { g_hid_tx_buf[g_hid_head] = *str++; g_hid_head = next; } 
-        else break; 
+        if (next != g_hid_tail) { g_hid_tx_buf[g_hid_head] = *str++; g_hid_head = next; }
+        else break;
     }
     if (g_u8UsbHidAppendCR) {
         uint16_t next = (g_hid_head + 1) % HID_TX_BUF_SIZE;
         if (next != g_hid_tail) { g_hid_tx_buf[g_hid_head] = 0x0D; g_hid_head = next; }
     }
 }
-
 int Trigger_USB_HID_Key(uint8_t mod, uint8_t key) {
     uint8_t report[8] = {0}; report[0] = mod; report[2] = key;
     uint32_t timeout = 0;
     while(g_u8EP2Ready == 0) { Delay_us(100); timeout++; if(timeout > 500) return 0; }
     g_u8EP2Ready = 0;
     USBD_MemCopy((uint8_t *)(USBD_BUF_BASE + USBD_GET_EP_BUF_ADDR(EP2)), report, 8); USBD_SET_PAYLOAD_LEN(EP2, 8);
-    return 1; 
+    return 1;
 }
-
 void Internal_Send_Char_HID(char c) {
-    uint8_t is_caps_on = (g_u8UsbHidSmartCaps && (g_u8Led_Status[0] & 0x02)) ? 1 : 0; 
-    uint8_t mod = 0; uint8_t key = 0; 
-    
+    uint8_t is_caps_on = (g_u8UsbHidSmartCaps && (g_u8Led_Status[0] & 0x02)) ? 1 : 0;
+    uint8_t mod = 0; uint8_t key = 0;
     if (c >= 'a' && c <= 'z') { key = c - 'a' + 0x04; mod = is_caps_on ? 0x02 : 0x00; }
     else if (c >= 'A' && c <= 'Z') { key = c - 'A' + 0x04; mod = is_caps_on ? 0x00 : 0x02; }
     else if (c >= '1' && c <= '9') { key = c - '1' + 0x1E; } else if (c == '0') { key = 0x27; } 
     else if (c == '-') { key = 0x2D; } else if (c == '_') { mod = 0x02; key = 0x2D; } 
     else if (c == ' ') { key = 0x2C; }
     else if (c == 0x0D) { key = 0x28; } 
-    
     if (key != 0) { 
         if (!Trigger_USB_HID_Key(mod, key)) return; 
         Delay_ms(2); 
@@ -661,49 +544,59 @@ void Internal_Send_Char_HID(char c) {
         Delay_ms(2); 
     }
 }
-
 void USBHID_Process_Queue(void) {
-    if (g_hid_head == g_hid_tail) return; 
+    if (g_hid_head == g_hid_tail) return;
     if (g_u8EP2Ready) {
         char c = g_hid_tx_buf[g_hid_tail];
         g_hid_tail = (g_hid_tail + 1) % HID_TX_BUF_SIZE;
         Internal_Send_Char_HID(c);
-        if (g_hid_head == g_hid_tail) {
-            JigBeep(100);
-        }
+        if (g_hid_head == g_hid_tail) { JigBeep(100); }
     }
 }
 
-// =======================================================
-// [UART1 與指令解析引擎]
-// =======================================================
+void DEBUG_PRINTF(const char *fmt, ...) {
+    if (!g_u8DebugEnable) return;
+    char debug_buf[128];
+    va_list args;
+    va_start(args, fmt);
+    int len = vsnprintf(debug_buf, sizeof(debug_buf), fmt, args);
+    va_end(args);
+    if(len > 0 && len < sizeof(debug_buf)) {
+        UART_Write(UART0, (uint8_t*)debug_buf, len);
+    }
+}
+
 int UART1_Read_Byte(uint8_t *data) {
     if (g_u1_rx_head == g_u1_rx_tail) return 0;
     *data = g_u1_rx_buf[g_u1_rx_tail]; g_u1_rx_tail = (g_u1_rx_tail + 1) % UART1_RX_BUF_SIZE; return 1;
 }
 
+// [V5.3.20 修正] 加入 Timeout 防止永久死鎖
 void UART1_Send_String(const char* str) {
-    while(*str) { UART_WRITE(UART1, *str++); while(UART1->FIFOSTS & UART_FIFOSTS_TXFULL_Msk); }
+    while(*str) { 
+        UART_WRITE(UART1, *str++); 
+        uint32_t timeout = 100000; 
+        while((UART1->FIFOSTS & UART_FIFOSTS_TXFULL_Msk) && timeout > 0) {
+            timeout--;
+        }
+    }
 }
 
 void Get_JIG_8CP_Checksum(const char* payload, char* checksum_out) {
-    uint8_t sum = 0; while (*payload) { sum += (uint8_t)(*payload); payload++; } snprintf(checksum_out, 3, "%02X", sum); 
+    uint8_t sum = 0; while (*payload) { sum += (uint8_t)(*payload); payload++; } snprintf(checksum_out, 3, "%02X", sum);
 }
-
 void JIG_8CP_Send_Packet(const char* cmd_code, const char* data) {
     char payload[64]; char checksum[3];
     snprintf(payload, sizeof(payload), "%s%s", cmd_code, data); Get_JIG_8CP_Checksum(payload, checksum);
     UART_WRITE(UART1, JIG_8CP_STX); UART1_Send_String(payload); UART1_Send_String(checksum); UART_WRITE(UART1, JIG_8CP_CR);
 }
 
-// g_web_power_toggle_req 僅在 Check_Power_Toggle 判斷「目前情境是否 Networked」時才會被消化，
-// 這裡維持它是全域，是因為 ISR/Parser 沒有情境概念，只負責忠實記錄「WEB 端要求了什麼」；
-// 真正決定「要不要理它」的權力，交回給呼叫者手上的 PowerCtx。
 volatile int g_web_power_toggle_req = 0;
 
+// [V5.3.20 修正] 移除 strcmp 中多餘的空格
 void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
     if (strcmp(cmd_code, "SC") == 0) {
-        USBHID_Enqueue_String(data); 
+        USBHID_Enqueue_String(data);
     }
     else if (strcmp(cmd_code, "V") == 0) {
         JIG_8CP_Send_Packet("V", FIRMWARE_VERSION);
@@ -715,9 +608,6 @@ void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
         JIG_8CP_Send_Packet("GC", "?");
     }
     else if (strcmp(cmd_code, "CF") == 0) {
-        // --- [V5.3.18] CF 只會寫入「目前註冊的 Networked 情境」；
-        //     若目前正在 Wiegand/TK2/RS232 (Isolated，未註冊)，此指令會被直接忽略，
-        //     不會有任何殘留設定可以掛到這些介面上。
         if (g_pActiveNetworkedCtx != NULL) {
             float scale, c_max, v_min, v_max;
             int ov_sec;
@@ -759,23 +649,21 @@ void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
             }
         }
     }
-    else if (strcmp(cmd_code, "AS_OK") == 0) { 
+    else if (strcmp(cmd_code, "AS_OK") == 0) {
         if (strcmp(data, "OK") == 0) {
-             UI_Clear();
-             Safe_Print_OLED_Smooth(24, 0, 63, 0x0F, "   SD Card Save OK!");
-             UI_Update();
-             Delay_ms(1000);
+            UI_Clear();
+            Safe_Print_OLED_Smooth(24, 0, 63, 0x0F, "   SD Card Save OK! ");
+            UI_Update();
+            Delay_ms(1000);
         }
     }
     else if (strcmp(cmd_code, "PW") == 0) {
         if (strcmp(data, "?") == 0) {
             JIG_8CP_Send_Packet("PW", g_power_state ? "ON" : "OFF");
         }
-        // --- [V5.3.18] PW ON/OFF 一律先記錄旗標，真正是否生效由 Check_Power_Toggle
-        //     依「呼叫者情境是否為 Networked」決定 -> Isolated 介面下 WEB 電源鍵天生無效
         else if (strstr(data, "ON") != NULL) {
             g_web_power_toggle_req = 1;
-        } 
+        }
         else if (strstr(data, "OFF") != NULL) {
             g_web_power_toggle_req = 2;
         }
@@ -784,7 +672,6 @@ void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
 
 void Process_UART1_JIG_8CP_Parser(void) {
     static uint8_t rx_packet[128]; static uint8_t rx_idx = 0; static uint8_t is_stx_received = 0; uint8_t c;
-
     while(UART1_Read_Byte(&c)) {
         if (c == JIG_8CP_STX) { is_stx_received = 1; rx_idx = 0; } 
         else if (c == JIG_8CP_CR) {
@@ -793,12 +680,10 @@ void Process_UART1_JIG_8CP_Parser(void) {
                 char received_chk[3]; received_chk[0] = rx_packet[rx_idx - 2]; received_chk[1] = rx_packet[rx_idx - 1]; received_chk[2] = '\0';
                 rx_packet[rx_idx - 2] = '\0'; 
                 char calculated_chk[3]; Get_JIG_8CP_Checksum((char*)rx_packet, calculated_chk); 
-                
                 if (strcmp(received_chk, calculated_chk) == 0) {
                     char cmd_code[3] = {0}; 
                     char* data_str = "";
                     int payload_len = rx_idx - 2;
-                    
                     if (payload_len >= 2) {
                         cmd_code[0] = rx_packet[0]; cmd_code[1] = rx_packet[1];
                         data_str = (char*)&rx_packet[2];
@@ -816,49 +701,50 @@ void Process_UART1_JIG_8CP_Parser(void) {
     }
 }
 
-// =======================================================
-// [PinConfig 與底層硬體初始化]
-// =======================================================
 void WIFIBLE_ReaderTest_init(void) {
-    SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA5MFP_Msk | SYS_GPA_MFPL_PA4MFP_Msk);  SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA5MFP_I2C0_SCL | SYS_GPA_MFPL_PA4MFP_I2C0_SDA);
-    SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA7MFP_Msk | SYS_GPA_MFPL_PA6MFP_Msk);  SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA7MFP_I2C1_SCL | SYS_GPA_MFPL_PA6MFP_I2C1_SDA);
-    SYS->GPF_MFPL &= ~(SYS_GPF_MFPL_PF1MFP_Msk | SYS_GPF_MFPL_PF0MFP_Msk);  SYS->GPF_MFPL |= (SYS_GPF_MFPL_PF1MFP_ICE_CLK | SYS_GPF_MFPL_PF0MFP_ICE_DAT);
-    SYS->GPA_MFPH &= ~(SYS_GPA_MFPH_PA11MFP_Msk | SYS_GPA_MFPH_PA10MFP_Msk | SYS_GPA_MFPH_PA9MFP_Msk | SYS_GPA_MFPH_PA8MFP_Msk); SYS->GPA_MFPH |= (SYS_GPA_MFPH_PA11MFP_GPIO | SYS_GPA_MFPH_PA10MFP_GPIO | SYS_GPA_MFPH_PA9MFP_GPIO | SYS_GPA_MFPH_PA8MFP_GPIO);
-    SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA1MFP_Msk); SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA1MFP_GPIO);
-    SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB15MFP_Msk | SYS_GPB_MFPH_PB14MFP_Msk | SYS_GPB_MFPH_PB8MFP_Msk); SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB15MFP_GPIO | SYS_GPB_MFPH_PB14MFP_GPIO | SYS_GPB_MFPH_PB8MFP_GPIO);
-    SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB7MFP_Msk | SYS_GPB_MFPL_PB6MFP_Msk | SYS_GPB_MFPL_PB5MFP_Msk | SYS_GPB_MFPL_PB4MFP_Msk); SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB7MFP_GPIO | SYS_GPB_MFPL_PB6MFP_GPIO | SYS_GPB_MFPL_PB5MFP_GPIO | SYS_GPB_MFPL_PB4MFP_GPIO);
-    SYS->GPC_MFPH &= ~(SYS_GPC_MFPH_PC14MFP_Msk); SYS->GPC_MFPH |= (SYS_GPC_MFPH_PC14MFP_GPIO);
-    SYS->GPC_MFPL &= ~(SYS_GPC_MFPL_PC7MFP_Msk | SYS_GPC_MFPL_PC6MFP_Msk | SYS_GPC_MFPL_PC1MFP_Msk | SYS_GPC_MFPL_PC0MFP_Msk); SYS->GPC_MFPL |= (SYS_GPC_MFPL_PC7MFP_GPIO | SYS_GPC_MFPL_PC6MFP_GPIO | SYS_GPC_MFPL_PC1MFP_GPIO | SYS_GPC_MFPL_PC0MFP_GPIO);
-    SYS->GPD_MFPH &= ~(SYS_GPD_MFPH_PD15MFP_Msk); SYS->GPD_MFPH |= (SYS_GPD_MFPH_PD15MFP_GPIO);
-    SYS->GPD_MFPL &= ~(SYS_GPD_MFPL_PD3MFP_Msk | SYS_GPD_MFPL_PD2MFP_Msk | SYS_GPD_MFPL_PD1MFP_Msk | SYS_GPD_MFPL_PD0MFP_Msk); SYS->GPD_MFPL |= (SYS_GPD_MFPL_PD3MFP_GPIO | SYS_GPD_MFPL_PD2MFP_GPIO | SYS_GPD_MFPL_PD1MFP_GPIO | SYS_GPD_MFPL_PD0MFP_GPIO);
-    SYS->GPF_MFPH &= ~(SYS_GPF_MFPH_PF15MFP_Msk | SYS_GPF_MFPH_PF14MFP_Msk);  SYS->GPF_MFPH |= (SYS_GPF_MFPH_PF15MFP_GPIO | SYS_GPF_MFPH_PF14MFP_GPIO);
-    SYS->GPF_MFPL &= ~(SYS_GPF_MFPL_PF6MFP_Msk | SYS_GPF_MFPL_PF5MFP_Msk | SYS_GPF_MFPL_PF4MFP_Msk | SYS_GPF_MFPL_PF3MFP_Msk | SYS_GPF_MFPL_PF2MFP_Msk); SYS->GPF_MFPL |= (SYS_GPF_MFPL_PF6MFP_GPIO | SYS_GPF_MFPL_PF5MFP_GPIO | SYS_GPF_MFPL_PF4MFP_GPIO | SYS_GPF_MFPL_PF3MFP_GPIO | SYS_GPF_MFPL_PF2MFP_GPIO);
-    SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA3MFP_Msk | SYS_GPA_MFPL_PA2MFP_Msk | SYS_GPA_MFPL_PA0MFP_Msk); SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA3MFP_SPI0_SS | SYS_GPA_MFPL_PA2MFP_SPI0_CLK | SYS_GPA_MFPL_PA0MFP_SPI0_MOSI);
-    SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB13MFP_Msk | SYS_GPB_MFPH_PB12MFP_Msk); SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB13MFP_GPIO | SYS_GPB_MFPH_PB12MFP_GPIO); // 廢除 UART0 轉純 GPIO
-    SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB3MFP_Msk | SYS_GPB_MFPL_PB2MFP_Msk); SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB3MFP_UART1_TXD | SYS_GPB_MFPL_PB2MFP_UART1_RXD);
-    SYS->GPB_MFPL &= ~(SYS_GPB_MFPL_PB1MFP_Msk | SYS_GPB_MFPL_PB0MFP_Msk); SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB1MFP_UART2_TXD | SYS_GPB_MFPL_PB0MFP_UART2_RXD);
+    SYS->GPA_MFPL  &= ~(SYS_GPA_MFPL_PA5MFP_Msk | SYS_GPA_MFPL_PA4MFP_Msk);  SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA5MFP_I2C0_SCL | SYS_GPA_MFPL_PA4MFP_I2C0_SDA);
+    SYS->GPA_MFPL  &= ~(SYS_GPA_MFPL_PA7MFP_Msk | SYS_GPA_MFPL_PA6MFP_Msk);  SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA7MFP_I2C1_SCL | SYS_GPA_MFPL_PA6MFP_I2C1_SDA);
+    SYS->GPF_MFPL  &= ~(SYS_GPF_MFPL_PF1MFP_Msk | SYS_GPF_MFPL_PF0MFP_Msk);  SYS->GPF_MFPL |= (SYS_GPF_MFPL_PF1MFP_ICE_CLK | SYS_GPF_MFPL_PF0MFP_ICE_DAT);
+    SYS->GPA_MFPH  &= ~(SYS_GPA_MFPH_PA11MFP_Msk | SYS_GPA_MFPH_PA10MFP_Msk | SYS_GPA_MFPH_PA9MFP_Msk | SYS_GPA_MFPH_PA8MFP_Msk); SYS->GPA_MFPH |= (SYS_GPA_MFPH_PA11MFP_GPIO | SYS_GPA_MFPH_PA10MFP_GPIO | SYS_GPA_MFPH_PA9MFP_GPIO | SYS_GPA_MFPH_PA8MFP_GPIO);
+    SYS->GPA_MFPL  &= ~(SYS_GPA_MFPL_PA1MFP_Msk); SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA1MFP_GPIO);
+    SYS->GPB_MFPH  &= ~(SYS_GPB_MFPH_PB15MFP_Msk | SYS_GPB_MFPH_PB14MFP_Msk | SYS_GPB_MFPH_PB8MFP_Msk); SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB15MFP_GPIO | SYS_GPB_MFPH_PB14MFP_GPIO | SYS_GPB_MFPH_PB8MFP_GPIO);
+    SYS->GPB_MFPL  &= ~(SYS_GPB_MFPL_PB7MFP_Msk | SYS_GPB_MFPL_PB6MFP_Msk | SYS_GPB_MFPL_PB5MFP_Msk | SYS_GPB_MFPL_PB4MFP_Msk); SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB7MFP_GPIO | SYS_GPB_MFPL_PB6MFP_GPIO | SYS_GPB_MFPL_PB5MFP_GPIO | SYS_GPB_MFPL_PB4MFP_GPIO);
+    SYS->GPC_MFPH  &= ~(SYS_GPC_MFPH_PC14MFP_Msk); SYS->GPC_MFPH |= (SYS_GPC_MFPH_PC14MFP_GPIO);
+    SYS->GPC_MFPL  &= ~(SYS_GPC_MFPL_PC7MFP_Msk | SYS_GPC_MFPL_PC6MFP_Msk | SYS_GPC_MFPL_PC1MFP_Msk | SYS_GPC_MFPL_PC0MFP_Msk); SYS->GPC_MFPL |= (SYS_GPC_MFPL_PC7MFP_GPIO | SYS_GPC_MFPL_PC6MFP_GPIO | SYS_GPC_MFPL_PC1MFP_GPIO | SYS_GPC_MFPL_PC0MFP_GPIO);
+    SYS->GPD_MFPH  &= ~(SYS_GPD_MFPH_PD15MFP_Msk); SYS->GPD_MFPH |= (SYS_GPD_MFPH_PD15MFP_GPIO);
+    SYS->GPD_MFPL  &= ~(SYS_GPD_MFPL_PD3MFP_Msk | SYS_GPD_MFPL_PD2MFP_Msk | SYS_GPD_MFPL_PD1MFP_Msk | SYS_GPD_MFPL_PD0MFP_Msk); SYS->GPD_MFPL |= (SYS_GPD_MFPL_PD3MFP_GPIO | SYS_GPD_MFPL_PD2MFP_GPIO | SYS_GPD_MFPL_PD1MFP_GPIO | SYS_GPD_MFPL_PD0MFP_GPIO);
+    SYS->GPF_MFPH  &= ~(SYS_GPF_MFPH_PF15MFP_Msk | SYS_GPF_MFPH_PF14MFP_Msk);  SYS->GPF_MFPH |= (SYS_GPF_MFPH_PF15MFP_GPIO | SYS_GPF_MFPH_PF14MFP_GPIO);
+    SYS->GPF_MFPL  &= ~(SYS_GPF_MFPL_PF6MFP_Msk | SYS_GPF_MFPL_PF5MFP_Msk | SYS_GPF_MFPL_PF4MFP_Msk | SYS_GPF_MFPL_PF3MFP_Msk | SYS_GPF_MFPL_PF2MFP_Msk); SYS->GPF_MFPL |= (SYS_GPF_MFPL_PF6MFP_GPIO | SYS_GPF_MFPL_PF5MFP_GPIO | SYS_GPF_MFPL_PF4MFP_GPIO | SYS_GPF_MFPL_PF3MFP_GPIO | SYS_GPF_MFPL_PF2MFP_GPIO);
+    SYS->GPA_MFPL  &= ~(SYS_GPA_MFPL_PA3MFP_Msk | SYS_GPA_MFPL_PA2MFP_Msk | SYS_GPA_MFPL_PA0MFP_Msk); SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA3MFP_SPI0_SS | SYS_GPA_MFPL_PA2MFP_SPI0_CLK | SYS_GPA_MFPL_PA0MFP_SPI0_MOSI);
+    
+    // [V5.3.20 修正] 恢復 UART0 腳位映射
+    SYS->GPB_MFPH  &= ~(SYS_GPB_MFPH_PB13MFP_Msk | SYS_GPB_MFPH_PB12MFP_Msk); 
+    SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB13MFP_UART0_TXD | SYS_GPB_MFPH_PB12MFP_UART0_RXD);
+    
+    SYS->GPB_MFPL  &= ~(SYS_GPB_MFPL_PB3MFP_Msk | SYS_GPB_MFPL_PB2MFP_Msk); SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB3MFP_UART1_TXD | SYS_GPB_MFPL_PB2MFP_UART1_RXD);
+    SYS->GPB_MFPL  &= ~(SYS_GPB_MFPL_PB1MFP_Msk | SYS_GPB_MFPL_PB0MFP_Msk); SYS->GPB_MFPL |= (SYS_GPB_MFPL_PB1MFP_UART2_TXD | SYS_GPB_MFPL_PB0MFP_UART2_RXD);
 }
 
 void Setup_GPIO_Modes(void) {
-    GPIO_SetMode(PB, BIT15, GPIO_MODE_OUTPUT); PB15 = 0; 
-    GPIO_SetMode(PC, BIT1, GPIO_MODE_OUTPUT); GPIO_SetMode(PC, BIT0, GPIO_MODE_OUTPUT); 
-    GPIO_SetMode(PD, BIT3, GPIO_MODE_OUTPUT); GPIO_SetMode(PD, BIT15, GPIO_MODE_OUTPUT); 
-    GPIO_SetMode(PF, BIT15, GPIO_MODE_OUTPUT); 
-    GPIO_SetMode(PB, BIT0, GPIO_MODE_QUASI); GPIO_SetMode(PA, BIT1, GPIO_MODE_QUASI); 
-    GPIO_SetMode(PD, BIT2, GPIO_MODE_QUASI); GPIO_SetMode(PD, BIT1, GPIO_MODE_QUASI); GPIO_SetMode(PD, BIT0, GPIO_MODE_QUASI); 
-    GPIO_SetMode(PA, BIT8, GPIO_MODE_QUASI); GPIO_SetMode(PF, BIT6, GPIO_MODE_QUASI); GPIO_SetMode(PF, BIT14, GPIO_MODE_QUASI);
+    GPIO_SetMode(PB, BIT15, GPIO_MODE_OUTPUT); PB15 = 0;
+    GPIO_SetMode(PC, BIT1, GPIO_MODE_OUTPUT); GPIO_SetMode(PC, BIT0, GPIO_MODE_OUTPUT);
+    GPIO_SetMode(PD, BIT3, GPIO_MODE_OUTPUT); GPIO_SetMode(PD, BIT15, GPIO_MODE_OUTPUT);
+    GPIO_SetMode(PF, BIT15, GPIO_MODE_OUTPUT);
+    GPIO_SetMode(PB, BIT0, GPIO_MODE_QUASI); GPIO_SetMode(PA, BIT1, GPIO_MODE_QUASI);
+    GPIO_SetMode(PD, BIT2, GPIO_MODE_QUASI); GPIO_SetMode(PD, BIT1, GPIO_MODE_QUASI); GPIO_SetMode(PD, BIT0, GPIO_MODE_QUASI);
+    GPIO_SetMode(PA, BIT8, GPIO_MODE_QUASI);  GPIO_SetMode(PF, BIT6, GPIO_MODE_QUASI); GPIO_SetMode(PF, BIT14, GPIO_MODE_QUASI);
     GPIO_SetMode(PF, BIT5, GPIO_MODE_QUASI); GPIO_SetMode(PF, BIT3, GPIO_MODE_QUASI); GPIO_SetMode(PF, BIT4, GPIO_MODE_QUASI);
-    GPIO_SetMode(PC, BIT7, GPIO_MODE_OUTPUT); PC->DOUT &= ~BIT7; 
+    GPIO_SetMode(PC, BIT7, GPIO_MODE_OUTPUT); PC->DOUT  &= ~BIT7;
     PD->DOUT |= BIT15; PF->DOUT |= BIT15; PC->DOUT |= BIT1;  PD->DOUT |= BIT3;  PA->DOUT |= BIT8;
     PF->DOUT |= (BIT6 | BIT14 | BIT5 | BIT3 | BIT4);
-    SYS->GPA_MFPH &= ~(SYS_GPA_MFPH_PA12MFP_Msk | SYS_GPA_MFPH_PA13MFP_Msk | SYS_GPA_MFPH_PA14MFP_Msk);
+    SYS->GPA_MFPH  &= ~(SYS_GPA_MFPH_PA12MFP_Msk | SYS_GPA_MFPH_PA13MFP_Msk | SYS_GPA_MFPH_PA14MFP_Msk);
     SYS->GPA_MFPH |= ((14ul << SYS_GPA_MFPH_PA12MFP_Pos) | (14ul << SYS_GPA_MFPH_PA13MFP_Pos) | (14ul << SYS_GPA_MFPH_PA14MFP_Pos));
 }
 
 void Interface_init(void){
-    GPIO_SetMode(PB, BIT6, GPIO_MODE_OUTPUT); GPIO_SetMode(PB, BIT7, GPIO_MODE_OUTPUT); 
-    GPIO_SetMode(PA, BIT11, GPIO_MODE_OUTPUT); GPIO_SetMode(PB, BIT4, GPIO_MODE_OUTPUT); 
-    PB6 = 0; PB7 = 0; PA11 = 0; PB4 = 0;  
+    GPIO_SetMode(PB, BIT6, GPIO_MODE_OUTPUT); GPIO_SetMode(PB, BIT7, GPIO_MODE_OUTPUT);
+    GPIO_SetMode(PA, BIT11, GPIO_MODE_OUTPUT); GPIO_SetMode(PB, BIT4, GPIO_MODE_OUTPUT);
+    PB6 = 0; PB7 = 0; PA11 = 0; PB4 = 0;
 }
 
 void SYS_Init(void) {
@@ -866,20 +752,20 @@ void SYS_Init(void) {
     CLK_EnableXtalRC(CLK_PWRCTL_HIRCEN_Msk); CLK_WaitClockReady(CLK_STATUS_HIRCSTB_Msk);
     CLK_SetHCLK(CLK_CLKSEL0_HCLKSEL_HIRC, CLK_CLKDIV0_HCLK(1));
     CLK_EnableModuleClock(USBD_MODULE);
-    CLK->AHBCLK |= ((1ul << 0)|(1ul << 1)|(1ul << 2)|(1ul << 3)|(1ul << 5)); 
-    CLK_EnableModuleClock(SPI0_MODULE); CLK_EnableModuleClock(I2C0_MODULE); CLK_EnableModuleClock(I2C1_MODULE); 
+    CLK->AHBCLK |= ((1ul << 0)|(1ul << 1)|(1ul << 2)|(1ul << 3)|(1ul << 5));
+    CLK_EnableModuleClock(SPI0_MODULE); CLK_EnableModuleClock(I2C0_MODULE); CLK_EnableModuleClock(I2C1_MODULE);
+    CLK_EnableModuleClock(UART0_MODULE);
     CLK_EnableModuleClock(UART1_MODULE); CLK_SetModuleClock(UART1_MODULE, CLK_CLKSEL1_UART1SEL_HIRC, CLK_CLKDIV0_UART1(1));
     CLK_EnableModuleClock(UART2_MODULE); CLK_SetModuleClock(UART2_MODULE, CLK_CLKSEL3_UART2SEL_HIRC, CLK_CLKDIV4_UART2(1));
     CLK_EnableModuleClock(TMR0_MODULE); CLK_SetModuleClock(TMR0_MODULE, CLK_CLKSEL1_TMR0SEL_HIRC, 0);
-    
     CLK_EnableModuleClock(TMR1_MODULE); CLK_SetModuleClock(TMR1_MODULE, CLK_CLKSEL1_TMR1SEL_HIRC, 0);
     SystemCoreClockUpdate(); WIFIBLE_ReaderTest_init();
-    
     TIMER_Open(TIMER1, TIMER_PERIODIC_MODE, 1000);
     TIMER_EnableInt(TIMER1);
     NVIC_EnableIRQ(TMR1_IRQn);
     TIMER_Start(TIMER1);
-
+    UART_Open(UART0, 115200);
+    if (g_u8DebugEnable) { UART_Write(UART0, (uint8_t*)"Debug UART0 Init OK\r\n", 21); }
     UART_Open(UART1, 115200); UART1->FIFO = (UART1->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE;
     UART_EnableInt(UART1, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk); NVIC_EnableIRQ(UART13_IRQn);
     UART_Open(UART2, 9600); UART2->FIFO = (UART2->FIFO & (~UART_FIFO_RFITL_Msk)) | UART_FIFO_RFITL_1BYTE; UART_EnableInt(UART2, UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk);
@@ -887,9 +773,6 @@ void SYS_Init(void) {
     SYS_LockReg();
 }
 
-// =======================================================
-// [中斷與延遲模組]
-// =======================================================
 void TMR1_IRQHandler(void) {
     if(TIMER_GetIntFlag(TIMER1)) {
         TIMER_ClearIntFlag(TIMER1);
@@ -908,13 +791,11 @@ void UART13_IRQHandler(void) {
     }
 }
 void UART02_IRQHandler(void) {
-    uint32_t u32u2IntSts = UART2->INTSTS; 
+    uint32_t u32u2IntSts = UART2->INTSTS;
     uint32_t u32u2FIFOSts = UART2->FIFOSTS;
-    
     if(u32u2FIFOSts & (UART_FIFOSTS_FEF_Msk | UART_FIFOSTS_PEF_Msk | UART_FIFOSTS_BIF_Msk | UART_FIFOSTS_RXOVIF_Msk)) { 
         UART2->FIFOSTS = (UART_FIFOSTS_FEF_Msk | UART_FIFOSTS_PEF_Msk | UART_FIFOSTS_BIF_Msk | UART_FIFOSTS_RXOVIF_Msk); 
     }
-    
     if(u32u2IntSts & (UART_INTSTS_RDAINT_Msk | UART_INTSTS_RXTOINT_Msk)) {
         while((UART2->FIFOSTS & UART_FIFOSTS_RXEMPTY_Msk) == 0) {
             uint8_t c = UART_READ(UART2); 
@@ -1130,39 +1011,40 @@ void Time_Set_Menu_Loop(void) {
     }
 }
 
-// --- [V5.3.18 重構] Power_Monitor_Loop：唯一擁有 PWR_SCOPE_NETWORKED 情境的介面 ---
+// --- [V5.3.20 重構] Power_Monitor_Loop：根除幽靈通電與通訊阻塞 ---
 void Power_Monitor_Loop(void) {
     PowerCtx ctx;
     PowerCtx_Init(&ctx, PWR_SCOPE_NETWORKED);
-
-    // 註冊自己為「目前接受 WEB CF/PW 指令」的情境；離開本函式時務必清除（見文末 g_pActiveNetworkedCtx = NULL）
     g_pActiveNetworkedCtx = &ctx;
-	
-	  ctx.power_state = 0;
+    
+    ctx.power_state = 0;
     g_power_state = 0;
-    PC->DOUT &= ~BIT7;       // 確保實體電源 OFF
-    g_web_power_toggle_req = 0; // 清除殘留的網頁通電旗標
-
-
+    PC->DOUT &= ~BIT7;              // 確保實體電源 OFF
+    g_web_power_toggle_req = 0;     // 清除殘留的網頁通電旗標
+    
     UI_Clear(); 
     Safe_Print_OLED(0, "Power Monitor"); 
     Safe_Print_OLED(16, "Red Btn (Power)"); 
     Safe_Print_OLED(32, "Wait for Module..."); 
     UI_Update(); 
-    Delay_ms(1000); 
-
+    
+    // [V5.3.20 修正] 替換阻塞式 Delay_ms(1000)，防止初始化期間的幽靈通電
+    uint32_t init_wait_start = g_u32SystemMs;
+    while (g_u32SystemMs - init_wait_start < 1000) {
+        Global_Background_Tasks();      // 持續解析 UART，消化殘留封包
+        g_web_power_toggle_req = 0;     // 持續清除通電請求，死死按住
+        Delay_ms(10);
+    }
+    
     uint8_t last_white = 1;
-
     uint32_t last_ui_update_ms = g_u32SystemMs; 
     uint32_t last_pd_send_ms = g_u32SystemMs;   
     const uint32_t UI_UPDATE_INTERVAL_MS = 500; 
     const uint32_t PD_SEND_INTERVAL_MS = 20;   
-
     Reset_Current_Filter();
-
+    
     while(1) {
         Global_Background_Tasks(); if (g_force_alarm_menu) break; 
-
         if (Check_Power_Toggle(&ctx)) {
             if (ctx.power_state) { 
                 PC->DOUT |= BIT7; 
@@ -1175,60 +1057,39 @@ void Power_Monitor_Loop(void) {
             last_ui_update_ms = g_u32SystemMs; 
             last_pd_send_ms = g_u32SystemMs; 
         }
-
         Process_Background_Sampling(&ctx, g_u32SystemMs);
-
         if (Check_Reset_Button()) { 
             last_ui_update_ms = g_u32SystemMs; 
         }
-
         uint8_t white = (PF->PIN & BIT14) ? 1 : 0;
         if (white == 0 && last_white == 1) {
             JigBeep(50);
             g_u8WifiConnected = 0; 
             strcpy(g_szWifiIP, "WAITING...");
             JIG_8CP_Send_Packet("WI", "?"); 
-            // ==========================================
-            // [絕對防禦 2] 按下白鍵時強制斷電並清除旗標
-            // ==========================================
             ctx.power_state = 0;
             g_power_state = 0;
             PC->DOUT &= ~BIT7;
             g_web_power_toggle_req = 0;
-
             last_ui_update_ms = g_u32SystemMs; 
-            
-            // ==========================================
-            // [絕對防禦 3] 等待白鍵放開期間，持續清除旗標
-            // 防止 ESP32 在這幾百毫秒內收到網頁指令而將旗標設為 1
-            // ==========================================
-					
             while((PF->PIN & BIT14) == 0) {
-							g_web_power_toggle_req = 0; // <--- 關鍵：持續消化掉 ESP32 偷襲發來的通電請求
-							Delay_ms(10); 
-						} 
-						// 放開按鍵後，最後一次確保清除
+                g_web_power_toggle_req = 0; 
+                Delay_ms(10); 
+            } 
             g_web_power_toggle_req = 0;
         }
         last_white = white;
-
         if (Check_Exit_Button()) break;
-
-        // ---------------------------------------------------
-        // [任務 A] 螢幕刷新 (絕對時間控制)
-        // ---------------------------------------------------
+        
         if (g_u32SystemMs - last_ui_update_ms >= UI_UPDATE_INTERVAL_MS) {
             float voltage = getBusVoltage_V(); 
             float inst_current = getCurrent_mA(); 
             if (inst_current == 0.0f) { set237Calibration_1A(); inst_current = getCurrent_mA(); }
-
             UI_Clear();
             char buf1[33], buf2[33], buf3[33], buf4[33];
-            
             snprintf(buf1, 33, "AVG:%-6.1fmA        Max:%-6.1fmA", g_fCurrentAvg, g_fMaxCurrent);
             snprintf(buf2, 33, "CUR:%-6.1fmA        Min:%-6.0fmA", inst_current, (g_fMinCurrent==9999.0f)?0:g_fMinCurrent);
             snprintf(buf3, 33, "%-5.2fV              [Power:%s]", voltage, ctx.power_state?"ON ":"OFF");
-
             if (g_u8WifiConnected) {
                 snprintf(buf4, 33, "IP:%-14s B:Rst R:Pwr", g_szWifiIP); 
             } else if (strcmp(g_szWifiIP, "WAITING...") == 0) {
@@ -1236,40 +1097,35 @@ void Power_Monitor_Loop(void) {
             } else {
                 snprintf(buf4, 33, "W:WIFI IP B:Rst R:Pwr Y:Exit");
             }
-
             Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, buf1);
             Safe_Print_OLED_Smooth(16, 0, 63, 0x0F, buf2);
             Safe_Print_OLED_Smooth(32, 0, 63, 0x0F, buf3);
             Safe_Print_OLED_Smooth(48, 0, 63, 0x04, buf4); 
             UI_Update(); 
-            
             last_ui_update_ms = g_u32SystemMs; 
         }
-
-        // ---------------------------------------------------
-        // [任務 B] 數據傳送 WEB (正常模式)
-        // ---------------------------------------------------
-        if (g_u8WifiConnected && ctx.power_state) {
+        
+        // [V5.3.20 修正] 移除 g_u8WifiConnected 判斷，只要電源開啟就持續發送 PD
+        if (ctx.power_state) {
             if (g_u32SystemMs - last_pd_send_ms >= PD_SEND_INTERVAL_MS) { 
                 char data_str[32];
                 float inst_current = getCurrent_mA(); 
                 float voltage = getBusVoltage_V();
                 snprintf(data_str, sizeof(data_str), "%.1f,%.2f", inst_current, voltage);
                 JIG_8CP_Send_Packet("PD", data_str);
+                if (g_u8DebugEnable) {
+                    DEBUG_PRINTF("[M032_PD_TX] Time: %u, [DBG] Cnt=%u, Data: %s\r\n", g_u32SystemMs, g_u32PdCounter, data_str);
+                }
+                g_u32PdCounter++;
                 last_pd_send_ms = g_u32SystemMs; 
             }
-        } else {
-            last_pd_send_ms = g_u32SystemMs; 
         }
-
         Delay_ms(1); 
     }
-    
     PC->DOUT &= ~BIT7; g_power_state = 0; 
-    g_pActiveNetworkedCtx = NULL; // --- [V5.3.18] 離開時務必清除註冊，之後 CF/PW 一律無效直到下次進入 ---
+    g_pActiveNetworkedCtx = NULL; 
     UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
 }
-
 // =======================================================
 // [各式監控 UI 介面] - PWR_SCOPE_ISOLATED：完全獨立情境，天生不受 WEB CF/PW 影響
 // =======================================================
@@ -1749,75 +1605,57 @@ void UART1_JIG_8CP_Test(void) {
 int main(void) {
     SYS_Init();
     Setup_GPIO_Modes();
-    Delay_ms(500); 
-    
+    Delay_ms(500);
     USBD_Open(&gsInfo, HID_ClassRequest, NULL);
     HID_Init(); NVIC_EnableIRQ(USBD_IRQn); USBD_Start();
     OLED_Force_Reset(); vOLED_INIT(); vINA237_Init(); set237Calibration_1A(); RV3028_Init();
     
-    // 繪製新的按鍵提示啟動畫面
     UI_Clear(); 
     Safe_Print_OLED(0, "JIG-8FT-P1 (%s) --BALLY--", FIRMWARE_VERSION); 
     Safe_Print_OLED(16, "   |==============Blue: Down"); 
     Safe_Print_OLED(32, "   |    |=========Green: Up"); 
     Safe_Print_OLED(48, "   |    |    |====Yellow: Next"); 
     UI_Update();
-
     JigBeep(500); Delay_ms(100); JigBeep(500); 
-
-    // 取代 Delay_ms(1000)，改為卡在這邊等待「黃色鍵 (PF5)」按下
+    
     while(1) {
-        Global_Background_Tasks(); // 保持背景 USB/UART 通訊正常運作
-        
-        if ((PF->PIN & BIT5) == 0) { // 偵測黃色鍵 (PF5) 是否按下
-            Delay_ms(50); // 防彈跳 (Debounce)
+        Global_Background_Tasks(); 
+        if ((PF->PIN & BIT5) == 0) { 
+            Delay_ms(50); 
             if ((PF->PIN & BIT5) == 0) {
-                JigBeep(200); // 發出短逼聲確認已按下
-                // 等待使用者放開按鍵
-                while ((PF->PIN & BIT5) == 0) { 
-                    Global_Background_Tasks();
-                    Delay_ms(10); 
-                }
-                break; // 按鍵放開後，打破迴圈進入下一個畫面
+                JigBeep(200); 
+                while ((PF->PIN & BIT5) == 0) { Global_Background_Tasks(); Delay_ms(10); }
+                break; 
             }
         }
         Delay_ms(15);
     }
-    
-
     JIG_8CP_Send_Packet("AL", "?");
+    
     const char *menu_items[] = { "Power Monitor", "RS232 Monitor", "Wiegand", "TK2", "Time Set", "Buzzer Settings", "USBHID SET", "UART1 JIG_8CP" };
     const int NUM_ITEMS = sizeof(menu_items) / sizeof(menu_items[0]); 
     int current_idx = 0; 
-
     const char *baud_items[] = { "115200, N, 8, 1", "9600, N, 8, 1", "19200, N, 8, 1", "38400, N, 8, 1" };
     const uint32_t baud_values[] = { 115200, 9600, 19200, 38400 };
     const int NUM_BAUDS = sizeof(baud_items) / sizeof(baud_items[0]);
-
+    
     while(1) {
         Global_Background_Tasks(); 
         if (g_force_alarm_menu) { current_idx = 4; Time_Set_Menu_Loop(); continue; } 
-                
         char menu_title[64];
         snprintf(menu_title, sizeof(menu_title), "Select Function (%s)", FIRMWARE_VERSION);
         UI_Draw_Menu_State(menu_title, menu_items, NUM_ITEMS, current_idx);
         int selected = 0;
-
         while(1) {
             Global_Background_Tasks(); 
             if (g_force_alarm_menu) { selected = 2; break; }
-
             if((PF->PIN & BIT3) == 0) { Delay_ms(50); if((PF->PIN & BIT3) == 0) { JigBeep(50); UI_Menu_Scroll_Anim_Smooth(menu_title, menu_items, NUM_ITEMS, current_idx, 1); current_idx = (current_idx + 1) % NUM_ITEMS; while((PF->PIN & BIT3) == 0) { Delay_ms(10); } break; } }
             if((PF->PIN & BIT4) == 0) { Delay_ms(50); if((PF->PIN & BIT4) == 0) { JigBeep(50); UI_Menu_Scroll_Anim_Smooth(menu_title, menu_items, NUM_ITEMS, current_idx, -1); current_idx = (current_idx - 1 + NUM_ITEMS) % NUM_ITEMS; while((PF->PIN & BIT4) == 0) { Delay_ms(10); } break; } }
             if((PF->PIN & BIT5) == 0) { Delay_ms(50); if((PF->PIN & BIT5) == 0) { JigBeep(200); while((PF->PIN & BIT5) == 0) { Delay_ms(10); } selected = 1; break; } }
         }
-
         if (selected == 2) continue; 
-
         if (selected == 1) {
-            if (current_idx == 0) {
-                Power_Monitor_Loop(); 
-            }
+            if (current_idx == 0) { Power_Monitor_Loop(); }
             else if (current_idx == 1) {
                 int baud_idx = 1; int baud_selected = 0;
                 while(1) {

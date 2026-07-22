@@ -29,10 +29,14 @@
  * V2.1    2026/07/16 [電源狀態保護優化]
  * 1. 修正當開啟電源後若沒有電流，不執行任何保護動作，也不發送關閉電源指令給 M031。
  * 2. 僅在有實際電流的情況下進行超載保護檢查。
- * ===========================================================================================
- * */
+ *V2.2    2026/07/22 [高負載緩衝與 SD 卡路徑修復]
+ * 1. 擴大 UART RX Buffer 至 2048 bytes，完美吸收 SD 卡瀏覽等阻塞任務產生的數據洪峰，防止溢位。
+ * 2. 優化 readHostUART 狀態機，加入長度防護防止 rxBuffer 無限增長耗盡記憶體。
+ * 3. 修復 SD 卡編輯功能：對 server.arg("file") 套用 urlDecode()，解決子目錄路徑 "File Not Found" 問題。
+===========================================================================================
+*/
 
-#define FIRMWARE_VERSION "V2.1"
+#define FIRMWARE_VERSION "V2.2"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
@@ -163,9 +167,13 @@ String urlDecode(String str);
 bool isTextFile(const String& filename);
 
 void setup() {
-  Serial.begin(115200); 
+  Serial.begin(115200);
+  // 【關鍵修復】將預設 128 bytes 擴大至 2048 bytes，防止 SD 卡讀取阻塞時 UART 溢位
+  Serial.setRxBufferSize(2048); 
+    
   Serial2.begin(115200, SERIAL_8N1, SCANNER_RX_PIN, SCANNER_TX_PIN);
-
+  Serial2.setRxBufferSize(2048);
+    
   pinMode(WIFI_LED_PIN, OUTPUT);
   digitalWrite(WIFI_LED_PIN, LOW);
 
@@ -656,16 +664,15 @@ void handleSdDelete() {
 }
 
 void handleSdEdit() {
-  String filePath = server.arg("file");
+  String filePath = urlDecode(server.arg("file")); // <--- 加上 urlDecode
   if (filePath == "" || !SD.exists(filePath) || !isTextFile(filePath)) {
-    server.send(400, "text/plain", "Invalid file for editing");
-    return;
+      server.send(400, "text/plain", "Invalid file for editing");
+      return;
   }
-
   File file = SD.open(filePath, FILE_READ);
   if (!file) {
-    server.send(500, "text/plain", "Could not open file");
-    return;
+      server.send(500, "text/plain", "Could not open file");
+      return;
   }
 
   String content = file.readString();
@@ -708,7 +715,7 @@ void handleSdEdit() {
 }
 
 void handleSdSaveFile() {
-  String filePath = server.arg("file");
+  String filePath = urlDecode(server.arg("file")); // <--- 加上 urlDecode
   String content = server.arg("content");
 
   if (filePath == "" || content == "") {
@@ -736,7 +743,7 @@ void handleRoot() {
     welcomeMsg = "歡迎 「" + globalUser + "」 使用生技治具控制台！";
   }
 
-  String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>JIG-8FT-P1 總控制台</title><style>body{font-family: Arial, sans-serif; text-align: center; padding: 40px; background-color: #f4f4f9;} .btn {display: block; width: 80%; max-width: 300px; margin: 20px auto; padding: 20px; font-size: 20px; font-weight: bold; color: white; background-color: #0056b3; border: none; border-radius: 10px; cursor: pointer; text-decoration: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px;} .btn:hover {background-color: #004494;} .btn.alt {background-color: #28a745;} .btn.alt:hover {background-color: #218838;} .btn.alt2 {background-color: #f39c12;} .btn.alt2:hover {background-color: #e67e22;} .btn.sd {background-color: #8e44ad;} .btn.sd:hover {background-color: #7d3c98;} .welcome-msg {font-size: 18px; color: #2c3e50; margin: 15px 0; font-weight: bold;}</style></head><body><h2>⚙️ JIG-8FT-P1 控制面板</h2><div class='welcome-msg'>)rawliteral" 
+  String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>JIG-8FT-P1 總控制台</title><style>body{font-family: Arial, sans-serif; text-align: center; padding: 40px; background-color: #f4f4f9;} .btn {display: block; width: 80%; max-width: 300px; margin: 20px auto; padding: 20px; font-size: 20px; font-weight: bold; color: white; background-color: #0056b3; border: none; border-radius: 10px; cursor: pointer; text-decoration: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px;} .btn:hover {background-color: #004494;} .btn.alt {background-color: #28a745;} .btn.alt:hover {background-color: #218838;} .btn.alt2 {background-color: #f39c12;} .btn.alt2:hover {background-color: #e67e22;} .btn.sd {background-color: #8e44ad;} .btn.sd:hover {background-color: #7d3c98;} .welcome-msg {font-size: 18px; color: #2c3e50; margin: 15px 0; font-weight: bold;} </style></head><body><h2>🕹️ JIG-8FT-P1 控制面板 ()rawliteral" + String(FIRMWARE_VERSION) + R"rawliteral()</h2><div class='welcome-msg'>)rawliteral" 
   + welcomeMsg + 
   R"rawliteral(</div><a href='/wifi' class='btn'>🌐 網路備援設定</a><a href='/monitor' class='btn alt'>⚡ 電壓電流設定</a><a href='/alarms' class='btn alt2'>⏰ 多工鬧鐘設定</a><a href='/sdcard' class='btn sd'>📂 SD卡資料夾</a></body></html>)rawliteral";
   
@@ -1046,10 +1053,10 @@ void handleApiPower() {
   if (server.hasArg("state")) {
     String state = server.arg("state");
     if (state == "ON") {
-      sendToM031_JIG_8CP("PW", "PA8ON"); 
+      sendToM031_JIG_8CP("PW", "ON"); 
       power_state = "ON"; systemWarning = ""; cumulative_mAh = 0.0; cumulative_mWh = 0.0; overCurrentStartTime = 0; lastPdTime = millis(); powerOnTime = millis(); 
     } else {
-      sendToM031_JIG_8CP("PW", "PA8OFF"); power_state = "OFF";
+      sendToM031_JIG_8CP("PW", "OFF"); power_state = "OFF";
       systemWarning = ""; // 【修復點：手動斷電時清空警報字串，徹底解鎖網頁 Alert 視窗】
       if (isRecordingCSV) { csvFile.close(); isRecordingCSV = false; }
     }
@@ -1181,7 +1188,7 @@ void checkSafetyLimits() {
           // --- [V2.1] 修正：只有在有電流時才觸發保護 ---
           if (current_mA > 0) { // 僅在有實際電流的情況下進行保護檢查
             if (!safetyTripOccurred) {
-              sendToM031_JIG_8CP("PW", "PA8OFF"); 
+              sendToM031_JIG_8CP("PW", "OFF"); 
               systemWarning = "【電壓超標熔斷】實時電壓 " + String(current_V, 2) + "V 觸及安全邊界！";
               safetyTripOccurred = true; 
               if (isRecordingCSV) { csvFile.println("ERROR,電壓超標安全熔斷"); csvFile.close(); isRecordingCSV = false; }
@@ -1198,7 +1205,7 @@ void checkSafetyLimits() {
             if (overCurrentStartTime == 0) overCurrentStartTime = currentMillis;
             else if (currentMillis - overCurrentStartTime >= conf_limitDuration * 1000UL) {
               if (!safetyTripOccurred) {
-                sendToM031_JIG_8CP("PW", "PA8OFF");
+                sendToM031_JIG_8CP("PW", "OFF");
                 systemWarning = "【電流超載延時熔斷】電流連續超標！";
                 safetyTripOccurred = true; 
                 if (isRecordingCSV) { csvFile.println("ERROR,電流超載安全熔斷"); csvFile.close(); isRecordingCSV = false; }
@@ -1244,13 +1251,28 @@ void sendToM031_JIG_8CP(String cmd, String data) {
 }
 
 void readHostUART() {
-  static String rxBuffer = ""; static bool isReceiving = false;
-  while (Serial.available()) {
-    char c = Serial.read();
-    if (c == JIG_8CP_STX) { rxBuffer = ""; isReceiving = true; } 
-    else if (c == JIG_8CP_CR && isReceiving) { isReceiving = false; processM031Command(rxBuffer); } 
-    else if (isReceiving) { rxBuffer += c; }
-  }
+    static String rxBuffer = ""; 
+    static bool isReceiving = false;
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (c == JIG_8CP_STX) { 
+            rxBuffer = ""; 
+            isReceiving = true; 
+        }
+        else if (c == JIG_8CP_CR && isReceiving) { 
+            isReceiving = false; 
+            processM031Command(rxBuffer); 
+            rxBuffer = ""; // 確保解析後清空
+        }
+        else if (isReceiving) { 
+            rxBuffer += c;
+            // <--- 新增防護機制：防止因丟失 CR 導致緩衝區無限增長耗盡記憶體
+            if (rxBuffer.length() > 128) { 
+                isReceiving = false;
+                rxBuffer = "";
+            }
+        }
+    }
 }
 
 void processM031Command(String packet) {
