@@ -1028,6 +1028,9 @@ void Power_Monitor_Loop(void) {
     Safe_Print_OLED(32, "Wait for Module..."); 
     UI_Update(); 
     
+	  // ✅ 关键修复：主动请求配置，确保一进入就有保护阈值
+    JIG_8CP_Send_Packet("GC", "?");
+	
     // [V5.3.20 修正] 替換阻塞式 Delay_ms(1000)，防止初始化期間的幽靈通電
     uint32_t init_wait_start = g_u32SystemMs;
     while (g_u32SystemMs - init_wait_start < 1000) {
@@ -1088,7 +1091,7 @@ void Power_Monitor_Loop(void) {
             UI_Clear();
             char buf1[33], buf2[33], buf3[33], buf4[33];
             snprintf(buf1, 33, "AVG:%-6.1fmA        Max:%-6.1fmA", g_fCurrentAvg, g_fMaxCurrent);
-            snprintf(buf2, 33, "CUR:%-6.1fmA        Min:%-6.0fmA", inst_current, (g_fMinCurrent==9999.0f)?0:g_fMinCurrent);
+            snprintf(buf2, 33, "CUR:%-6.1fmA        Min:%-6.0fmA", inst_current, (g_fMinCurrent > 9000.0f)?0.0f:g_fMinCurrent);
             snprintf(buf3, 33, "%-5.2fV              [Power:%s]", voltage, ctx.power_state?"ON ":"OFF");
             if (g_u8WifiConnected) {
                 snprintf(buf4, 33, "IP:%-14s B:Rst R:Pwr", g_szWifiIP); 

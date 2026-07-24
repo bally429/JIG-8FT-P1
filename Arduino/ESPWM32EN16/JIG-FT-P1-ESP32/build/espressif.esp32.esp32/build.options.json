@@ -1,0 +1,10 @@
+{
+  "additionalFiles": "",
+  "builtInLibrariesFolders": "C:\\Users\\BALLY.GIGATMS\\AppData\\Local\\Arduino15\\libraries",
+  "compiler.optimization_flags": "-Og -g3",
+  "customBuildProperties": "",
+  "fqbn": "espressif:esp32:esp32:UploadSpeed=921600,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=4M,PartitionScheme=default,DebugLevel=none,PSRAM=disabled,LoopCore=1,EventsCore=1,EraseFlash=none,JTAGAdapter=default,ZigbeeMode=default",
+  "hardwareFolders": "D:\\BALLY\\Documents\\Arduino\\hardware\\espressif\\esp32,D:\\BALLY\\Documents\\Arduino\\hardware\\espressif\\esp32",
+  "otherLibrariesFolders": "d:\\BALLY\\Documents\\Arduino\\libraries",
+  "sketchLocation": "D:\\BALLY\\Desktop\\M031_Series_BSP_CMSIS_V3.06.000\\BALLY_Project\\JIG-8FT-P1\\Arduino\\ESPWM32EN16\\JIG-FT-P1-ESP32"
+}
