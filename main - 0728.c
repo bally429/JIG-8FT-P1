@@ -41,11 +41,6 @@
  * 3. UART1 TX 防死鎖：加入 Timeout 機制，防止 ESP32 忙碌時 M031 永久卡死。
  * 4. 移除 PD 發送的 g_u8WifiConnected 錯誤判斷，防止 ESP32 誤判通訊逾時斷電。
  * 5. 修正 JIG_8CP_Command_Handler 中 strcmp 比對多餘空格的解析 Bug。
- * V5.4.0 (2026/07/27): [OTA 第1階段 - 跳轉驗證]
- *  新增 APROM→LDROM 跳轉觸發函式 OTA_Trigger_Jump_LDROM()，
- *  於 software reset 前完整關閉 USB（中斷源/中斷線/PHY/模組時鐘），
- *  避免跳入 LDROM 後 PHY 殘留導致主機列舉失敗。
- *  開機畫面以黑鍵(PF6) 作為驗證觸發入口（驗證用，正式版應移除）。
  * ===========================================================================================
  */
 
@@ -61,7 +56,7 @@
 // =======================================================
 // [系統版本控制]
 // =======================================================
-#define FIRMWARE_VERSION "V5.4.0"
+#define FIRMWARE_VERSION "V5.3.20"
 
 // =======================================================
 // [系統全域設定與變數]
@@ -193,7 +188,6 @@ void USBHID_Enqueue_Data(const char* str);
 void USBHID_Enqueue_String(const char* str);
 void USBHID_Process_Queue(void);
 void Internal_Send_Char_HID(char c);
-void OTA_Trigger_Jump_LDROM(void);
 
 #define CURRENT_FILTER_SIZE 50
 float g_fCurrentBuffer[CURRENT_FILTER_SIZE] = {0};
@@ -673,12 +667,6 @@ void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
         else if (strstr(data, "OFF") != NULL) {
             g_web_power_toggle_req = 2;
         }
-    }
-		else if (strcmp(cmd_code, "OT") == 0) {
-        /* [OTA 第2階段 驗證用] 收到 ESP32 的 OTA 請求 → 關 USB + 設 BS + reset 進 LDROM。
-           注意：此命令會立即中斷所有正常功能，第3階段須加防護
-           （例如：通電中拒絕、需附帶驗證碼、僅限特定情境）。 */
-        OTA_Trigger_Jump_LDROM();   /* 不返回 */
     }
 }
 
@@ -1732,38 +1720,6 @@ void UART1_JIG_8CP_Test(void) {
     }
 }
 
-void OTA_Trigger_Jump_LDROM(void)
-{
-    /* 0. 跳轉前強制斷電，OTA 途中繼電器不可吸合 */
-    PC->DOUT &= ~BIT7;
-
-    /* 1. 經 UART0 印出最後足跡 */
-    {
-        const char *msg = "OTA_JUMP_LDROM\r\n";
-        UART_Write(UART0, (uint8_t *)msg, strlen(msg));
-        while (!(UART0->FIFOSTS & UART_FIFOSTS_TXEMPTY_Msk)) { }
-    }
-
-    /* 2. 關閉 USB（釋放 D+ 上拉，防止跳 LDROM 後主機報「無法辨識的裝置」） */
-    USBD->INTEN = 0;
-    NVIC_DisableIRQ(USBD_IRQn);
-    USBD->ATTR = 0;
-    CLK_DisableModuleClock(USBD_MODULE);
-
-    /* 3. 關閉其餘中斷 */
-    NVIC_DisableIRQ(UART13_IRQn);
-    NVIC_DisableIRQ(UART02_IRQn);
-    NVIC_DisableIRQ(TMR1_IRQn);
-    __disable_irq();
-
-    /* 4. 設 BS=1（下次開機自 LDROM），立即 reset，不延遲 */
-    SYS_UnlockReg();
-    FMC->ISPCTL |= FMC_ISPCTL_ISPEN_Msk;
-    FMC->ISPCTL |= FMC_ISPCTL_BS_Msk;
-    SCB->AIRCR = (0x05FA0000UL | 0x00000004UL);   /* software reset */
-    while (1) { }
-}
-
 // =======================================================
 // [Main 主程式]
 // =======================================================
@@ -1780,7 +1736,6 @@ int main(void) {
     Safe_Print_OLED(16, "   |==============Blue: Down"); 
     Safe_Print_OLED(32, "   |    |=========Green: Up"); 
     Safe_Print_OLED(48, "   |    |    |====Yellow: Next"); 
-	
     UI_Update();
     JigBeep(500); Delay_ms(100); JigBeep(500); 
     
@@ -1792,14 +1747,6 @@ int main(void) {
                 JigBeep(200); 
                 while ((PF->PIN & BIT5) == 0) { Global_Background_Tasks(); Delay_ms(10); }
                 break; 
-            }
-        }
-				// [OTA 第1階段驗證] 黑鍵(PF6)：關 USB 並跳入 LDROM（驗證用入口）
-        if ((PF->PIN & BIT6) == 0) {
-            Delay_ms(50);
-            if ((PF->PIN & BIT6) == 0) {
-                JigForceBeep(300);
-                OTA_Trigger_Jump_LDROM();            // 不返回
             }
         }
         Delay_ms(15);

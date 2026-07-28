@@ -8,11 +8,9 @@ V3.4    2026/07/24 [Web OTA 韌體更新]
   1. 新增 Web OTA 功能：支援透過網頁直接上傳 .bin 檔案更新 ESP32 韌體。
   2. 首頁新增「🔄 韌體更新」入口，內建 AJAX 上傳與即時進度條顯示。
   3. 更新完成後設備自動重啟，無需插拔 SD 卡或連接 USB 線。
-V4.0  2026/07/28 [M031 OTA 第2階段] 新增 /api/isp_test，驗證 ESP32→M031 LDROM 之 UART1 ISP 握手
-      (CONNECT+GET_DEVICEID+RUN_APROM)，全程不寫 Flash。
 ===========================================================================================
 */
-#define FIRMWARE_VERSION  "V4.0"
+#define FIRMWARE_VERSION  "V3.4"
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -162,7 +160,6 @@ void setup() {
   server.on("/api/power", HTTP_POST, handleApiPower); 
   server.on("/api/saveConfig", HTTP_POST, handleApiSaveConfig);
   server.on("/api/downloadCSV", handleDownloadCSV);
-  server.on("/api/isp_test", HTTP_GET, handleIspTest);   // [OTA 第2階段] M031 LDROM 握手驗證
   
   // SD卡路由
   server.on("/sdcard", handleSdCard);
@@ -851,91 +848,4 @@ void processM031Command(String packet) {
   else if (cmd == "ST" && data == "OK") { Serial.println("RTC Sync OK"); }
   else if (cmd == "PW") { if (data.indexOf("ON") >= 0) { if (power_state != "ON") { powerOnTime = millis(); lastPdTime = millis(); } power_state = "ON"; } else if (data.indexOf("OFF") >= 0) power_state = "OFF"; broadcastWebSocket(); }
   else if (cmd == "PD") { unsigned long currentMillis = millis(); float deltaSec = 0.0; if (lastPdTime > 0) { deltaSec = (currentMillis - lastPdTime) / 1000.0; if (deltaSec > 2.0 || deltaSec <= 0) deltaSec = 0.1; } lastPdTime = currentMillis; int commaIdx = data.indexOf(','); if(commaIdx > 0) { current_mA = data.substring(0, commaIdx).toFloat(); current_V = data.substring(commaIdx + 1).toFloat(); } if (power_state == "ON") { cumulative_mAh += current_mA * (deltaSec / 3600.0); cumulative_mWh += (current_mA * current_V) * (deltaSec / 3600.0); if (isRecordingCSV && csvFile) { csvFile.printf("%s,%.2f,%.1f,%.4f,%.4f\n", getCSVStartTime().c_str(), current_V, current_mA, cumulative_mAh, cumulative_mWh); static unsigned long lastFlushTime = 0; if (currentMillis - lastFlushTime >= 1000) { csvFile.flush(); lastFlushTime = currentMillis; } } } }
-}
-
-// =======================================================
-// [OTA 第2階段] 驗證 ESP32 → M031 LDROM 的 UART1 ISP 握手
-// 僅送 CONNECT + GET_DEVICEID + RUN_APROM，【不寫 Flash】，零變磚風險。
-// 觸發：瀏覽器直接訪問 http://<ESP32_IP>/api/isp_test
-// =======================================================
-#define ISP_PKT_SIZE 64
-
-// 計算 host 送出封包的 checksum（與 device 端 Checksum() 對稱：整包 64B 累加截 uint16）
-static uint16_t isp_checksum(const uint8_t *pkt) {
-    uint16_t c = 0;
-    for (int i = 0; i < ISP_PKT_SIZE; i++) c += pkt[i];
-    return c;
-}
-
-// 一次連續送出 64 bytes（滿足 device「收滿 64 才 ready」）
-static void isp_send(const uint8_t *pkt) {
-    Serial.write(pkt, ISP_PKT_SIZE);
-}
-
-// 讀取 64 bytes response，超時回傳 false
-static bool isp_recv(uint8_t *buf, uint32_t timeout_ms) {
-    uint32_t t0 = millis();
-    int got = 0;
-    while (got < ISP_PKT_SIZE) {
-        if (Serial.available()) {
-            buf[got++] = Serial.read();
-        } else if (millis() - t0 > timeout_ms) {
-            return false;   // 超時（多半是 CONNECT 落在 300ms 握手窗口外）
-        }
-    }
-    return true;
-}
-
-void handleIspTest() {
-    String r = "=== M031 LDROM ISP 握手測試 (第2階段, 不寫Flash) ===\r\n";
-
-    // 0. 清空 Serial RX，避免 JIG_8CP 殘留字元混入
-    while (Serial.available()) Serial.read();
-
-    // 1. 送 JIG_8CP "OT" 觸發 M031 進 LDROM（此刻 M031 仍在 APROM，認 JIG_8CP）
-    sendToM031_JIG_8CP("OT", "");
-    delay(100);   // 等 M031 收 OT + reset + LDROM 開機 + UART1 就緒（窗口約 reset 後 20~320ms）
-    while (Serial.available()) Serial.read();   // 清掉 reset 期間可能的雜訊
-
-    // 2. CONNECT
-    uint8_t pkt[ISP_PKT_SIZE] = {0};
-    pkt[0] = 0xAE; pkt[1] = 0x00; pkt[2] = 0x00; pkt[3] = 0x00;   // CMD_CONNECT (LE)
-    uint16_t exp = isp_checksum(pkt);
-    isp_send(pkt);
-    uint8_t resp[ISP_PKT_SIZE];
-    bool ok1 = isp_recv(resp, 500);
-    uint16_t got1 = ok1 ? (uint16_t)(resp[0] | (resp[1] << 8)) : 0xFFFF;
-    r += "[CONNECT] 送出checksum=0x" + String(exp, HEX) +
-         " 收到=0x" + String(got1, HEX) +
-         " => " + String((ok1 && got1 == exp) ? "OK" : "FAIL") + "\r\n";
-
-    // 3. GET_DEVICEID
-    memset(pkt, 0, ISP_PKT_SIZE);
-    pkt[0] = 0xB1; pkt[1] = 0x00; pkt[2] = 0x00; pkt[3] = 0x00;   // CMD_GET_DEVICEID (LE)
-    exp = isp_checksum(pkt);
-    isp_send(pkt);
-    bool ok2 = isp_recv(resp, 500);
-    uint16_t got2 = ok2 ? (uint16_t)(resp[0] | (resp[1] << 8)) : 0xFFFF;
-    uint32_t pdid = ok2 ? ((uint32_t)resp[8] | ((uint32_t)resp[9] << 8) |
-                           ((uint32_t)resp[10] << 16) | ((uint32_t)resp[11] << 24)) : 0;
-    r += "[GET_DEVID] 送出checksum=0x" + String(exp, HEX) +
-         " 收到=0x" + String(got2, HEX) +
-         " => " + String((ok2 && got2 == exp) ? "OK" : "FAIL") + "\r\n";
-    r += "[PDID] 0x" + String(pdid, HEX) +
-         " => " + String((pdid != 0 && pdid != 0xFFFFFFFF) ? "合理(非0/非全F)" : "異常") + "\r\n";
-
-    // 4. RUN_APROM 讓 M031 跳回 APROM（此命令【無 response】，不可等）
-    memset(pkt, 0, ISP_PKT_SIZE);
-    pkt[0] = 0xAB; pkt[1] = 0x00; pkt[2] = 0x00; pkt[3] = 0x00;   // CMD_RUN_APROM (LE)
-    isp_send(pkt);
-    delay(200);   // 等 M031 software reset 回 APROM
-    r += "[RUN_APROM] 已送出(無response), 等M031回APROM\r\n";
-
-    // 5. 總判
-    bool pass = ok1 && (got1 == isp_checksum((const uint8_t[]){0xAE,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}))
-                    && ok2 && (got2 == isp_checksum((const uint8_t[]){0xB1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}))
-                    && (pdid != 0 && pdid != 0xFFFFFFFF);
-    r += "\r\n>>> 第2階段 " + String(pass ? "PASS <<<" : "FAIL <<<") + "\r\n";
-
-    server.send(200, "text/plain; charset=utf-8", r);
 }

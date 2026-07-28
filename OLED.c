@@ -2299,6 +2299,7 @@ const unsigned char font_8x16[] = {
 #undef SPI_CLK_FREQ
 #define SPI_CLK_FREQ   20000000 // 調高到 10MHz 2000000
 
+
 // 修改後：
 #define WAIT_SPI_IDLE(spi)  while(SPI_IS_BUSY(spi)) {}
 
