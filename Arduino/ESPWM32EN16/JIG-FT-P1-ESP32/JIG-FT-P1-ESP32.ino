@@ -10,9 +10,16 @@ V3.4    2026/07/24 [Web OTA 韌體更新]
   3. 更新完成後設備自動重啟，無需插拔 SD 卡或連接 USB 線。
 V4.0  2026/07/28 [M031 OTA 第2階段] 新增 /api/isp_test，驗證 ESP32→M031 LDROM 之 UART1 ISP 握手
       (CONNECT+GET_DEVICEID+RUN_APROM)，全程不寫 Flash。
+V4.1  2026/07/28 [M031 OTA 第3a步] 新增 /m031_ota 上傳 + 校驗 + dry-run 預檢。
+      檔名安全閘 m031_*.bin；版本由檔名解析；dry-run 純 host 端模擬位址覆蓋，不擦 M031。
+      真正燒錄於 V4.2 啟用。
+V4.2  2026/07/29 [M031 OTA 第3步] 新增 /m031_ota_burn 真正燒錄：經 LDROM UPDATE_APROM 擦寫 APROM。
+      同步阻塞於 handler（天然隔離 JIG_8CP 背景流量）；首包長 timeout 容納整片擦除；
+      每包 checksum 比對＝寫後驗證；燒完 RUN_APROM + VR 版本比對 + 雙 reset 同步。
+      新增 /api/restart；前端預估進度條。通電強制斷電雙層防護。
 ===========================================================================================
 */
-#define FIRMWARE_VERSION  "V4.0"
+#define FIRMWARE_VERSION  "V4.2"
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -133,6 +140,15 @@ bool isTextFile(const String& filename);
 // 🌟 [V3.4 新增] OTA 韌體更新函式宣告
 void handleFirmwareUpdate();
 void handleFirmwareUpload();
+// ===== [V4.1 M031 OTA 第3a步] forward declaration =====
+void handleM031Ota();
+void handleM031OtaUpload();
+void handleM031OtaUploadDone();
+void handleM031OtaReport();
+void handleM031OtaDryrun();
+void handleM031OtaBurn();
+void handleRestart();
+
 
 void setup() {
   Serial.begin(115200);
@@ -178,11 +194,18 @@ void setup() {
   server.on("/firmware", HTTP_POST, 
     [](){ 
       server.sendHeader("Connection", "close"); 
-      server.send(200, "text/plain", "OK"); 
+      server.send(200, "text/plain; charset=UTF-8", "OK"); 
     }, 
     handleFirmwareUpload
   );
   
+  server.on("/m031_ota", HTTP_GET, handleM031Ota);
+  server.on("/m031_ota_upload", HTTP_POST, handleM031OtaUploadDone, handleM031OtaUpload);
+  server.on("/m031_ota_report", HTTP_GET, handleM031OtaReport);
+  server.on("/api/m031_ota_dryrun", HTTP_GET, handleM031OtaDryrun);
+  server.on("/m031_ota_burn", HTTP_POST, handleM031OtaBurn);
+  server.on("/api/restart", HTTP_GET, handleRestart);
+
   server.onNotFound(handleNotFound);
   server.begin();
   webSocket.begin();
@@ -345,7 +368,7 @@ bool isTextFile(const String & filename) {
 
 void handleSdCard() {
   String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>SD Card File Manager</title><style>body{font-family: Arial, sans-serif; text-align: center; padding: 40px; background-color: #f4f4f9;} .btn {display: block; width: 80%; max-width: 300px; margin: 20px auto; padding: 20px; font-size: 20px; font-weight: bold; color: white; background-color: #0056b3; border: none; border-radius: 10px; cursor: pointer; text-decoration: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px;} .btn:hover {background-color: #004494;} .btn.sd {background-color: #8e44ad;} .btn.sd:hover {background-color: #7d3c98;} </style></head><body><h2> SD Card Management</h2><a href='/' class='btn'>🏠 返回首頁</a><a href='/sd/browse' class='btn sd'>📂 瀏覽 SD 卡</a></body></html>)rawliteral";
-  server.send(200, "text/html", html);
+  server.send(200, "text/html; charset=UTF-8", html);
 }
 
 void handleSdBrowse() {
@@ -426,7 +449,7 @@ body { font-family: Arial, sans-serif; background-color: #f4f4f9; padding: 20px;
 function deleteFile(filePath) { if (confirm('確定要刪除 ' + filePath + ' ?')) { fetch('/sd/delete', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'file=' + encodeURIComponent(filePath) }).then(r => r.text()).then(res => { if(res === 'OK') location.reload(); else alert('刪除失敗: ' + res); }); } }
 function deleteFolder(folderPath) { if (confirm('確定要刪除資料夾 ' + folderPath + ' ? (僅限空資料夾)')) { fetch('/sd/delete', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'folder=' + encodeURIComponent(folderPath) }).then(r => r.text()).then(res => { if(res === 'OK') location.reload(); else alert('刪除失敗: ' + res); }); } }
 </script></body></html>)rawliteral";
-  server.send(200, "text/html", html);
+  server.send(200, "text/html; charset=UTF-8", html);
 }
 
 void handleSdDownload() {
@@ -448,22 +471,22 @@ void handleSdUpload() {
     if (upload.filename != "") {
       String full_path = path + upload.filename;
       File f = SD.open(full_path, FILE_WRITE);
-      if (f) { f.write(upload.buf, upload.currentSize); f.close(); server.send(200, "text/plain", "OK"); return; } 
+      if (f) { f.write(upload.buf, upload.currentSize); f.close(); server.send(200, "text/plain; charset=UTF-8", "OK"); return; } 
       else { server.send(500, "text/plain", "Could not create file"); return; }
     }
   }
-  server.send(200, "text/plain", "OK");
+  server.send(200, "text/plain; charset=UTF-8", "OK");
 }
 
 void handleSdDelete() {
   String fileArg = server.arg("file");
   String folderArg = server.arg("folder");
   if (fileArg != "") {
-    if (SD.exists(fileArg)) { if (SD.remove(fileArg)) { server.send(200, "text/plain", "OK"); return; } else { server.send(500, "text/plain", "Could not delete file"); return; } } 
+    if (SD.exists(fileArg)) { if (SD.remove(fileArg)) { server.send(200, "text/plain; charset=UTF-8", "OK"); return; } else { server.send(500, "text/plain", "Could not delete file"); return; } } 
     else { server.send(404, "text/plain", "File not found"); return; }
   }
   if (folderArg != "") {
-    if (SD.exists(folderArg)) { if (SD.rmdir(folderArg)) { server.send(200, "text/plain", "OK"); return; } else { server.send(500, "text/plain", "Could not delete folder (not empty?)"); return; } } 
+    if (SD.exists(folderArg)) { if (SD.rmdir(folderArg)) { server.send(200, "text/plain; charset=UTF-8","OK"); return; } else { server.send(500, "text/plain", "Could not delete folder (not empty?)"); return; } } 
     else { server.send(404, "text/plain", "Folder not found"); return; }
   }
   server.send(400, "text/plain", "No file or folder specified");
@@ -477,7 +500,7 @@ void handleSdEdit() {
   String content = file.readString();
   file.close();
   String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Edit File</title><style>body{font-family:Arial; padding:20px;} textarea{width:100%; height:60vh; font-family:monospace;}</style></head><body><h2>✏️ Editing: )rawliteral" + filePath + R"rawliteral(</h2><form method='post' action='/sd/save'><input type='hidden' name='file' value=')rawliteral" + filePath + R"rawliteral('><textarea name='content'>)rawliteral" + content + R"rawliteral(</textarea><br><button type='submit'>💾 Save</button> <a href='/sd/browse'>Cancel</a></form></body></html>)rawliteral";
-  server.send(200, "text/html", html);
+  server.send(200, "text/html; charset=UTF-8", html);
 }
 
 void handleSdSaveFile() {
@@ -488,7 +511,7 @@ void handleSdSaveFile() {
   if (!file) { server.send(500, "text/plain", "Could not open file for writing"); return; }
   file.print(content);
   file.close();
-  server.send(200, "text/plain", "OK");
+  server.send(200, "text/plain; charset=UTF-8", "OK");
 }
 
 // 🌟 [V3.4 新增] OTA 韌體更新處理函式
@@ -551,7 +574,7 @@ document.getElementById('uploadForm').addEventListener('submit', function(e) {
   xhr.send(formData);
 });
 </script></body></html>)rawliteral";
-  server.send(200, "text/html", html);
+  server.send(200, "text/html; charset=UTF-8", html);
 }
 
 void handleFirmwareUpload() {
@@ -582,8 +605,37 @@ void handleRoot() {
   if (globalUser != "" && globalUser.length() > 0) {
     welcomeMsg = "歡迎 「" + globalUser + "」 使用生技治具控制台！";
   }
-  String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>JIG-8FT-P1 總控制台</title><style>body{font-family: Arial, sans-serif; text-align: center; padding: 40px; background-color: #f4f4f9;} .btn {display: block; width: 80%; max-width: 300px; margin: 20px auto; padding: 20px; font-size: 20px; font-weight: bold; color: white; background-color: #0056b3; border: none; border-radius: 10px; cursor: pointer; text-decoration: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px;} .btn:hover {background-color: #004494;} .btn.alt {background-color: #28a745;} .btn.alt:hover {background-color: #218838;} .btn.alt2 {background-color: #f39c12;} .btn.alt2:hover {background-color: #e67e22;} .btn.sd {background-color: #8e44ad;} .btn.sd:hover {background-color: #7d3c98;} .btn.ota {background-color: #6c757d;} .btn.ota:hover {background-color: #5a6268;} .welcome-msg {font-size: 18px; color: #2c3e50; margin: 15px 0; font-weight: bold;} </style></head><body><h2>⚙️ JIG-8FT-P1 控制面板 ()rawliteral" + String(FIRMWARE_VERSION) + R"rawliteral()</h2><div class='welcome-msg'>)rawliteral" + welcomeMsg + R"rawliteral(</div><a href='/wifi' class='btn'>🌐 網路備援設定</a><a href='/monitor' class='btn alt'>⚡ 電壓電流設定</a><a href='/alarms' class='btn alt2'>⏰ 多工鬧鐘設定</a><a href='/sdcard' class='btn sd'>📂 SD卡資料夾</a><a href='/firmware' class='btn ota'>🔄 韌體更新 (OTA)</a></body></html>)rawliteral";
-  server.send(200, "text/html", html);
+  // 頁尾資訊：IP + 連線模式（先算好，footer 只切一個點，降低拼接出錯機率）
+  String footStr = (isAPMode ? WiFi.softAPIP() : WiFi.localIP()).toString()
+                   + "　·　" + (isAPMode ? "AP 模式" : "STA 模式");
+
+  // ── 拼接地圖（共 3 個切點，皆為「插入 C++ 變數」才切；純 HTML 不切）──
+  //   段1 ... <span class='ver-pill'>   [切點A: +FIRMWARE_VERSION+ ]   </span></h2><div class='welcome-msg'>
+  //   段2                                [切點B: +welcomeMsg+      ]   </div> ...所有按鈕... <b>
+  //   段3                                [切點C: +footStr+         ]   </b></div></div></body></html>
+  //  注意：ver-pill 的 <span> 開標籤在段1、</span> 閉標籤在段2，跨切點拼接後仍連續正確。
+  String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>JIG-8FT-P1 總控制台</title><style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:28px 14px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC","Microsoft JhengHei",Roboto,Helvetica,Arial,sans-serif;color:#1f2933;background:radial-gradient(1100px 520px at 12% -8%,#e8f0fe 0%,rgba(232,240,254,0) 60%),radial-gradient(820px 460px at 100% 0%,#e6fcf5 0%,rgba(230,252,245,0) 55%),linear-gradient(180deg,#f6f7fb 0%,#eceef3 100%);}
+.console{width:100%;max-width:430px;background:#fff;border:1px solid rgba(31,41,51,.06);border-radius:18px;padding:26px 20px 16px;box-shadow:0 12px 34px rgba(31,41,51,.10),0 2px 6px rgba(31,41,51,.06);}
+h2{margin:0 0 2px;text-align:center;font-size:clamp(1.35rem,5vw,1.9rem);font-weight:800;letter-spacing:-.02em;line-height:1.2;color:#102a43;display:flex;align-items:center;justify-content:center;gap:9px;flex-wrap:wrap;}
+.ver-pill{font-size:.7rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:#0b7285;background:#e6fcf5;border:1px solid #96f2d7;padding:3px 9px;border-radius:999px;}
+.welcome-msg{text-align:center;font-size:.95rem;font-weight:500;color:#52606d;margin:8px 0 20px;}
+.btn{position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;width:100%;margin:0 0 12px;padding:15px 18px;font-size:1.02rem;font-weight:600;color:#fff;background-color:#0056b3;border:none;border-radius:12px;cursor:pointer;text-decoration:none;box-shadow:0 3px 9px rgba(0,0,0,.13);transition:transform .16s ease,box-shadow .16s ease,background-color .16s ease,filter .16s ease;}
+.btn:last-of-type{margin-bottom:0;}
+.btn:hover{transform:translateY(-3px);box-shadow:0 9px 20px rgba(0,0,0,.19);filter:brightness(1.07);}
+.btn:active{transform:translateY(-1px);box-shadow:0 4px 11px rgba(0,0,0,.16);}
+.btn::after{content:"";position:absolute;top:0;left:-65%;width:45%;height:100%;background:linear-gradient(120deg,transparent,rgba(255,255,255,.38),transparent);transform:skewX(-20deg);transition:left .55s ease;pointer-events:none;}
+.btn:hover::after{left:135%;}
+.btn.alt{background-color:#28a745;}
+.btn.alt2{background-color:#f39c12;}
+.btn.sd{background-color:#8e44ad;}
+.btn.ota{background-color:#6c757d;}
+.btn.m031{background-color:#00897b;}
+.foot{margin-top:18px;text-align:center;font-size:.78rem;color:#8993a4;letter-spacing:.02em;}
+.foot b{color:#52606d;font-weight:600;}
+</style></head><body><div class='console'><h2>⚙️ JIG-8FT-P1 控制台 <span class='ver-pill'>)rawliteral" + String(FIRMWARE_VERSION) + R"rawliteral(</span></h2><div class='welcome-msg'>)rawliteral" + welcomeMsg + R"rawliteral(</div><a href='/wifi' class='btn'>🌐 網路備援設定</a><a href='/monitor' class='btn alt'>⚡ 電壓電流設定</a><a href='/alarms' class='btn alt2'>⏰ 多工鬧鐘設定</a><a href='/sdcard' class='btn sd'>📂 SD 卡資料夾</a><a href='/firmware' class='btn ota'>🔄 ESP32 韌體更新</a><a href='/m031_ota' class='btn m031'>🛠️ M031 韌體更新</a><div class='foot'>設備在線　<b>)rawliteral" + footStr + R"rawliteral(</b></div></div></body></html>)rawliteral";
+  server.send(200, "text/html; charset=UTF-8", html);
 }
 
 void handleAlarmsSet() {
@@ -599,7 +651,7 @@ void handleAlarmsSet() {
     html += "<div><label style='font-size:18px; font-weight:bold;'><input type='checkbox' name='en" + String(i) + "' value='1' " + checked + " style='width:22px; height:22px; vertical-align:middle;'> 啟用開關</label></div></div>";
   }
   html += "<button type='submit' style='width:100%; padding:15px; font-size:18px; background:#4CAF50; color:white; border:none; border-radius:8px; cursor:pointer;'>💾 儲存並同步至設備</button></form></body></html>";
-  server.send(200, "text/html", html);
+  server.send(200, "text/html; charset=UTF-8", html);
 }
 
 void handleApiSaveAlarms() {
@@ -613,7 +665,7 @@ void handleApiSaveAlarms() {
       sendToM031_JIG_8CP("AL", buf); delay(80);
     }
   }
-  saveAlarmsConfig(); server.send(200, "text/plain", "OK");
+  saveAlarmsConfig(); server.send(200, "text/plain; charset=UTF-8", "OK");
 }
 
 void handleWiFiSet() {
@@ -621,7 +673,7 @@ void handleWiFiSet() {
   html += "<div class='card'><h3>全域使用者 (User)</h3><input type='text' name='globalUser' value='" + globalUser + "' style='width:100%; padding:8px;'></div>";
   for (int i = 0; i < 5; i++) { html += "<div class='card'><h3>備援組 " + String(i + 1) + "</h3>網路名稱 (SSID):<br><input type='text' name='ssid" + String(i + 1) + "' value='" + wifiList[i].ssid + "' style='width:100%; padding:8px; margin-bottom:10px;'><br>密碼 (Password):<br><input type='text' name='pass" + String(i + 1) + "' value='" + wifiList[i].pass + "' style='width:100%; padding:8px;'><br></div>"; }
   html += "<input type='submit' value='💾 儲存並重啟設備' style='width:100%; padding:15px; font-size:18px; background:#4CAF50; color:white; border:none; border-radius:8px; cursor:pointer;'></form></body></html>";
-  server.send(200, "text/html", html);
+  server.send(200, "text/html; charset=UTF-8", html);
 }
 
 void handleSaveWiFi() {
@@ -631,6 +683,12 @@ void handleSaveWiFi() {
 }
 
 void handleMonitor() {
+  // ★ [V4.3 新增] 請求 M031 進入 Power Monitor
+  // M031 端會自行判斷 g_u8InPowerMonitor：
+  //   已在 PM → 靜默忽略，不中斷 PD 發送
+  //   不在 PM → 設定旗標，在下一個安全點自動進入
+  sendToM031_JIG_8CP("PM", "ENTER");
+
   String html = R"rawliteral(
 <!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>
 <title>電壓電流即時分析儀 )rawliteral" + String(FIRMWARE_VERSION) + R"rawliteral(</title>
@@ -770,7 +828,7 @@ function togglePower() { const newState = (JS_PowerState === "OFF") ? "ON" : "OF
 function saveConfig() { const params = new URLSearchParams({ maxScale: document.getElementById('maxScale').value, minScale: document.getElementById('minScale').value, limitScale: document.getElementById('limitScale').value, minVol: document.getElementById('minVol').value, maxVol: document.getElementById('maxVol').value, dur: document.getElementById('dur').value, vMaxScale: document.getElementById('vMaxScale').value, vMinScale: document.getElementById('vMinScale').value }); fetch('/api/saveConfig', { method: 'POST', body: params }).then(() => alert("💾 安全配置與圖表刻度已寫入 SD 卡保存！")); }
 function closeModal() { document.getElementById("warnModal").style.display = "none"; document.getElementById("modalOverlay").style.display = "none"; }
 </script></body></html>)rawliteral";
-  server.send(200, "text/html", html);
+  server.send(200, "text/html; charset=UTF-8", html);
 }
 
 void handleApiData() {
@@ -783,7 +841,7 @@ void handleApiPower() {
     String state = server.arg("state");
     if (state == "ON") { sendToM031_JIG_8CP("PW", "ON"); power_state = "ON"; systemWarning = ""; cumulative_mAh = 0.0; cumulative_mWh = 0.0; overCurrentStartTime = 0; lastPdTime = millis(); powerOnTime = millis(); } 
     else { sendToM031_JIG_8CP("PW", "OFF"); power_state = "OFF"; systemWarning = ""; if (isRecordingCSV) { csvFile.close(); isRecordingCSV = false; } }
-    broadcastWebSocket(); server.send(200, "text/plain", "OK");
+    broadcastWebSocket(); server.send(200, "text/plain; charset=UTF-8", "OK");
   }
 }
 
@@ -796,7 +854,7 @@ void handleApiSaveConfig() {
   if (server.hasArg("dur")) conf_limitDuration = server.arg("dur").toInt();
   if (server.hasArg("vMaxScale")) conf_vMaxScale = server.arg("vMaxScale").toFloat();
   if (server.hasArg("vMinScale")) conf_vMinScale = server.arg("vMinScale").toFloat();
-  savePowerConfig(); sendConfigToM031(); server.send(200, "text/plain", "OK");
+  savePowerConfig(); sendConfigToM031(); server.send(200, "text/plain; charset=UTF-8", "OK");
 }
 
 void handleDownloadCSV() {
@@ -939,3 +997,256 @@ void handleIspTest() {
 
     server.send(200, "text/plain; charset=utf-8", r);
 }
+
+// =======================================================
+// [OTA 區塊 V4.2] 從此行整段覆蓋到檔案結尾
+// =======================================================
+#define M031_OTA_PENDING   "/ota/m031_pending.bin"
+#define M031_APROM_MAX     (128 * 1024)
+
+static String  g_ota_pending_path = "";
+static uint32_t g_ota_pending_size = 0;
+static String  g_ota_expected_ver = "";
+static bool    g_ota_dryrun_ok = false;
+static String  g_ota_dryrun_report = "";
+static int     g_ota_upload_status = 200;
+static String  g_ota_upload_body   = "";
+
+static String ota_parse_version(const String &fname) {
+  int i = fname.indexOf('V');
+  while (i >= 0) {
+    int p = i + 1, dots = 0, digits = 0, end = p;
+    int len = fname.length();
+    for (int k = p; k < len; k++) {
+      char c = fname.charAt(k);
+      if (c >= '0' && c <= '9') { digits++; end = k + 1; }
+      else if (c == '.' && digits > 0 && dots < 2) { dots++; digits = 0; end = k + 1; }
+      else { break; }
+    }
+    if (dots == 2 && digits > 0) return fname.substring(i, end);
+    i = fname.indexOf('V', i + 1);
+  }
+  return "";
+}
+
+static bool ota_dryrun(uint32_t bin_size, String &report) {
+  report = "";
+  if (bin_size == 0 || (bin_size % 4) != 0 || bin_size > M031_APROM_MAX) {
+    report += "FAIL: 大小非法或非4倍數或逾上限\r\n";
+    return false;
+  }
+  uint32_t addr = 0, remaining = bin_size;
+  int pkt = 0; bool ok = true;
+  {
+    uint32_t first_data = remaining < 48 ? remaining : 48;
+    if ((first_data % 4) != 0) ok = false;
+    char line[96];
+    snprintf(line, sizeof(line), "pkt#%d cmd=0xA0 off=16 len=%u -> flash 0x%05X..0x%05X (%u)\r\n",
+             pkt, (unsigned)first_data, (unsigned)addr, (unsigned)(addr + first_data - 1), (unsigned)first_data);
+    report += line;
+    addr += first_data; remaining -= first_data; pkt++;
+  }
+  while (remaining > 0) {
+    uint32_t chunk = remaining < 56 ? remaining : 56;
+    if ((chunk % 4) != 0) ok = false;
+    char line[96];
+    snprintf(line, sizeof(line), "pkt#%d cmd=0x00 off=8  len=%u -> flash 0x%05X..0x%05X (%u)\r\n",
+             pkt, (unsigned)chunk, (unsigned)addr, (unsigned)(addr + chunk - 1), (unsigned)chunk);
+    report += line;
+    addr += chunk; remaining -= chunk; pkt++;
+  }
+  char tail[96];
+  snprintf(tail, sizeof(tail), "---- 共 %d 包, 覆蓋 flash [0x00000..0x%05X], bin_size=%u, 連續=%s, 4對齊=%s\r\n",
+           pkt, (unsigned)(bin_size - 1), (unsigned)bin_size, (addr == bin_size) ? "YES" : "NO", ok ? "YES" : "NO");
+  report += tail;
+  if (addr != bin_size) ok = false;
+  return ok;
+}
+
+void handleM031Ota() {
+  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>M031 韌體更新</title>";
+  html += "<style>body{font-family:Arial,sans-serif;text-align:center;padding:30px;background:#f4f4f9;}.box{background:#fff;max-width:560px;margin:0 auto;padding:25px;border-radius:10px;box-shadow:0 4px 6px rgba(0,0,0,.1);}input[type=file]{margin:15px 0;width:100%;}button{padding:12px 24px;font-size:16px;font-weight:bold;color:#fff;background:#8e44ad;border:none;border-radius:5px;cursor:pointer;width:100%;}.note{font-size:13px;color:#666;text-align:left;background:#fffbe6;border:1px solid #ffe58f;padding:10px;border-radius:5px;margin-top:15px;}.back{display:inline-block;margin-top:18px;color:#0056b3;text-decoration:none;font-weight:bold;}</style>";
+  html += "</head><body><div class='box'><h2>🛠️ M031 韌體更新</h2>";
+  html += "<form action='/m031_ota_upload' method='POST' enctype='multipart/form-data'>";
+  html += "<input type='file' name='binfile' accept='.bin' required><button type='submit'>上傳並預檢</button></form>";
+  html += "<div class='note'><b>檔名規格：</b><code>m031_Vx.y.z.bin</code>（例 <code>m031_V5.5.0.bin</code>）。<br>前綴 <code>m031_</code> 與副檔名 <code>.bin</code> 為強制安全閘。<br>版本字串須與 bin 內 FIRMWARE_VERSION 逐字相同。</div>";
+  html += "<a href='/' class='back'>⬅ 返回首頁</a></div></body></html>";
+  server.send(200, "text/html; charset=UTF-8", html);
+}
+
+void handleM031OtaUpload() {
+  HTTPUpload &upload = server.upload();
+  static File wf;
+  static String fname = "";
+  static bool rejected = false;
+  if (upload.status == UPLOAD_FILE_START) {
+    fname = upload.filename;
+    rejected = false;
+    g_ota_upload_status = 200;
+    g_ota_upload_body = "";
+    if (wf) wf.close();
+    String low = fname; low.toLowerCase();
+    if (!low.startsWith("m031_") || !low.endsWith(".bin")) { rejected = true; return; }
+    if (!SD.exists("/ota")) SD.mkdir("/ota");
+    wf = SD.open(M031_OTA_PENDING, FILE_WRITE);
+    if (!wf) { rejected = true; g_ota_upload_status = 500; g_ota_upload_body = "無法建立暫存檔 /ota/m031_pending.bin"; }
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (!rejected && wf) wf.write(upload.buf, upload.currentSize);
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (wf) wf.close();
+    if (rejected) {
+      SD.remove(M031_OTA_PENDING);
+      g_ota_upload_status = 400;
+      g_ota_upload_body = "拒絕：檔名不符安全閘（須為 m031_*.bin），未寫入任何檔案。";
+      return;
+    }
+    uint32_t sz = upload.totalSize;
+    g_ota_pending_path = M031_OTA_PENDING;
+    g_ota_pending_size = sz;
+    g_ota_expected_ver = ota_parse_version(fname);
+    g_ota_dryrun_ok = ota_dryrun(sz, g_ota_dryrun_report);
+    g_ota_upload_status = 200;
+    g_ota_upload_body = g_ota_dryrun_report;
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    if (wf) wf.close();
+    SD.remove(M031_OTA_PENDING);
+    g_ota_upload_status = 400;
+    g_ota_upload_body = "上傳中止";
+  }
+}
+
+// 主 handler：上傳成功且預檢通過 → 重導向到帶燒錄按鈕的報告頁
+void handleM031OtaUploadDone() {
+  if (g_ota_upload_status == 200 && g_ota_dryrun_ok && g_ota_pending_size > 0) {
+    server.sendHeader("Location", "/m031_ota_report");
+    server.send(303, "text/plain; charset=UTF-8", "redirecting to report");
+    return;
+  }
+  server.send(g_ota_upload_status, "text/plain; charset=UTF-8", g_ota_upload_body);
+}
+
+void handleM031OtaReport() {
+  bool canBurn = g_ota_dryrun_ok && (g_ota_pending_size > 0);
+  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>M031 OTA 報告</title>";
+  html += "<style>body{font-family:Arial,sans-serif;padding:25px;background:#f4f4f9;}.box{background:#fff;max-width:720px;margin:0 auto;padding:20px;border-radius:10px;box-shadow:0 4px 6px rgba(0,0,0,.1);}pre{background:#1e1e1e;color:#0f0;padding:12px;border-radius:6px;white-space:pre-wrap;font-size:13px;}.ok{color:#28a745;font-weight:bold;}.fail{color:#dc3545;font-weight:bold;}.back{display:inline-block;margin-top:15px;color:#0056b3;text-decoration:none;font-weight:bold;}.burn{margin-top:18px;padding:14px 24px;font-size:17px;font-weight:bold;color:#fff;background:#c0392b;border:none;border-radius:6px;cursor:pointer;width:100%;}.burn:disabled{background:#999;cursor:not-allowed;}#progMask{display:none;margin-top:18px;}#barC{width:100%;background:#e9ecef;border-radius:5px;overflow:hidden;height:22px;}#bar{height:100%;width:0%;background:#007bff;transition:width .2s;}#result{margin-top:14px;font-size:15px;line-height:1.6;}.warn{background:#fff3cd;border:1px solid #ffe58f;color:#856404;padding:10px;border-radius:5px;margin-top:12px;font-size:13px;}</style>";
+  html += "</head><body><div class='box'><h2>📋 M031 OTA 預檢報告</h2>";
+  html += "<p>待燒檔: <code>" + g_ota_pending_path + "</code></p>";
+  html += "<p>大小: " + String(g_ota_pending_size) + " byte　|　預期版本: " + (g_ota_expected_ver.length() ? g_ota_expected_ver : String("（未指定）")) + "</p>";
+  html += "<p>dry-run: " + String(g_ota_dryrun_ok ? "<span class='ok'>PASS</span>" : "<span class='fail'>FAIL</span>") + "</p>";
+  html += "<pre>" + g_ota_dryrun_report + "</pre>";
+  if (canBurn) {
+    html += "<div class='warn'>⚠ 燒錄將先強制斷電並擦除 M031 整片 APROM，約 12–15 秒，期間請勿斷電或關網頁。萬一失敗，以 Nu-Link 重燒 APROM+LDROM 救回。</div>";
+    html += "<button id='burnBtn' class='burn' onclick='startBurn()'>🔥 確認燒錄 M031</button>";
+    html += "<div id='progMask'><div id='barC'><div id='bar'></div></div><p id='ptxt'>準備中...</p></div>";
+    html += "<div id='result'></div>";
+    html += "<script>function startBurn(){if(!confirm('燒錄將擦除 M031 APROM，約 12-15 秒，期間請勿斷電。確認？'))return;var b=document.getElementById('burnBtn');b.disabled=true;document.getElementById('progMask').style.display='block';document.getElementById('result').innerHTML='';var p=0;var iv=setInterval(function(){if(p<90){p+=90/120;}document.getElementById('bar').style.width=p+'%';document.getElementById('ptxt').innerText='燒錄中 '+Math.round(p)+'%（預估，請勿斷電）';},100);fetch('/m031_ota_burn',{method:'POST'}).then(function(r){return r.json();}).then(function(j){clearInterval(iv);document.getElementById('bar').style.width='100%';var h='';if(j.status==='OK'){h+='<span class=\"ok\">✅ 燒錄成功</span>　共 '+j.packets+' 包<br>';h+='預期版本：'+j.expected_ver+'　實際回讀：'+(j.actual_ver&&j.actual_ver.length?j.actual_ver:'(未讀取)')+'<br>';if(j.ver_match===false)h+='<span style=\"color:#f39c12\">⚠ 版本不符或未讀取，請人工確認 M031 開機版號</span><br>';h+='<b>ESP32 重啟，與 M031 同步握手...</b>';document.getElementById('ptxt').innerText='完成 100%';document.getElementById('result').innerHTML=h;setTimeout(function(){fetch('/api/restart');setTimeout(function(){location.href='/';},1000);},500);}else{h+='<span class=\"fail\">❌ 燒錄失敗</span>　階段：'+j.stage+'　原因：'+j.error+'<br>';h+='請以 Nu-Link 重燒 M031 APROM+LDROM 救回。';document.getElementById('ptxt').innerText='失敗';document.getElementById('result').innerHTML=h;document.getElementById('progMask').style.display='none';b.disabled=false;}}).catch(function(e){clearInterval(iv);document.getElementById('result').innerHTML='<span class=\"fail\">❌ 通訊錯誤：'+e+'</span>　請以 Nu-Link 檢查 M031。';document.getElementById('progMask').style.display='none';b.disabled=false;});}</script>";
+  } else {
+    html += "<p class='fail'>預檢未通過，無法燒錄。請重新上傳符合 m031_Vx.y.z.bin 的檔案。</p>";
+  }
+  html += "<a href='/m031_ota' class='back'>⬅ 重新上傳</a>　<a href='/' class='back'>🏠 首頁</a></div></body></html>";
+  server.send(200, "text/html; charset=UTF-8", html);
+}
+
+void handleM031OtaDryrun() {
+  server.send(200, "text/plain; charset=UTF-8",
+    "expected_ver=" + g_ota_expected_ver + "\r\nsize=" + String(g_ota_pending_size) +
+    "\r\ndryrun_ok=" + String(g_ota_dryrun_ok ? "1" : "0") + "\r\n\r\n" + g_ota_dryrun_report);
+}
+
+// =======================================================
+// [OTA 第3步 V4.2] 真正燒錄 M031 APROM
+// =======================================================
+#define OTA_ERASE_TIMEOUT_MS  15000
+#define OTA_PKT_TIMEOUT_MS     2000
+
+static String ota_makeFail(const char* stage, const char* msg, int packets) {
+  return String("{\"status\":\"FAIL\",\"stage\":\"") + stage +
+         "\",\"error\":\"" + msg +
+         "\",\"expected_ver\":\"" + g_ota_expected_ver +
+         "\",\"actual_ver\":\"\",\"packets\":" + packets + "}";
+}
+
+static String readJIG8CP(const char* expectCmd, uint32_t timeout_ms) {
+  uint32_t t0 = millis();
+  uint8_t buf[160]; int idx = 0; bool inStx = false;
+  while (millis() - t0 < timeout_ms) {
+    if (Serial.available()) {
+      uint8_t c = Serial.read();
+      if (c == JIG_8CP_STX) { idx = 0; inStx = true; continue; }
+      if (!inStx) continue;
+      if (c == JIG_8CP_CR) {
+        inStx = false;
+        if (idx >= 3) {
+          char recvChk[3] = { (char)buf[idx-2], (char)buf[idx-1], 0 };
+          buf[idx-2] = 0;
+          uint8_t sum = 0; for (int i = 0; i < idx-2; i++) sum += buf[i];
+          char calcChk[3]; sprintf(calcChk, "%02X", sum);
+          if (strcmp(recvChk, calcChk) == 0 && buf[0] == expectCmd[0] && buf[1] == expectCmd[1]) {
+            return String((char*)(buf + 2));
+          }
+        }
+        idx = 0;
+      } else {
+        if (idx < (int)sizeof(buf) - 1) buf[idx++] = c; else { inStx = false; idx = 0; }
+      }
+    } else { delay(1); }
+  }
+  return "";
+}
+
+void handleM031OtaBurn() {
+  if (!g_ota_dryrun_ok || g_ota_pending_size == 0 || !SD.exists(M031_OTA_PENDING)) {
+    server.send(400, "application/json", ota_makeFail("PRE", "no valid pending bin", 0)); return;
+  }
+  sendToM031_JIG_8CP("PW", "OFF"); power_state = "OFF"; delay(100);
+  while (Serial.available()) Serial.read();
+  sendToM031_JIG_8CP("OT", "");
+  String ot = readJIG8CP("OT", 1000);
+  if (ot.length() == 0)     { server.send(500, "application/json", ota_makeFail("OT", "no response", 0)); return; }
+  if (ot.startsWith("ERR")) { server.send(409, "application/json", ota_makeFail("OT", "M031 reject power-on", 0)); return; }
+  delay(200); while (Serial.available()) Serial.read();
+  uint8_t pkt[64], resp[64];
+  memset(pkt, 0, 64); pkt[0] = 0xAE;
+  uint16_t exp = isp_checksum(pkt); isp_send(pkt);
+  bool ok = isp_recv(resp, 1000);
+  uint16_t got = ok ? (uint16_t)(resp[0] | (resp[1] << 8)) : 0xFFFF;
+  if (!ok || got != exp) { server.send(500, "application/json", ota_makeFail("CONNECT", "checksum/timeout", 0)); return; }
+  File bf = SD.open(M031_OTA_PENDING, FILE_READ);
+  if (!bf) { server.send(500, "application/json", ota_makeFail("OPEN", "sd read fail", 0)); return; }
+  memset(pkt, 0, 64);
+  pkt[0] = 0xA0;
+  pkt[12] =  g_ota_pending_size        & 0xFF;
+  pkt[13] = (g_ota_pending_size >>  8) & 0xFF;
+  pkt[14] = (g_ota_pending_size >> 16) & 0xFF;
+  pkt[15] = (g_ota_pending_size >> 24) & 0xFF;
+  int rd = bf.read(pkt + 16, 48);
+  exp = isp_checksum(pkt); isp_send(pkt);
+  ok = isp_recv(resp, OTA_ERASE_TIMEOUT_MS);
+  got = ok ? (uint16_t)(resp[0] | (resp[1] << 8)) : 0xFFFF;
+  if (!ok || got != exp) { bf.close(); server.send(500, "application/json", ota_makeFail("ERASE", "first pkt fail", 1)); return; }
+  uint32_t sent = (uint32_t)rd; int packets = 1;
+  while (sent < g_ota_pending_size) {
+    memset(pkt, 0, 64);
+    int chunk = (int)(g_ota_pending_size - sent); if (chunk > 56) chunk = 56;
+    int r2 = bf.read(pkt + 8, chunk);
+    exp = isp_checksum(pkt); isp_send(pkt);
+    ok = isp_recv(resp, OTA_PKT_TIMEOUT_MS);
+    got = ok ? (uint16_t)(resp[0] | (resp[1] << 8)) : 0xFFFF;
+    if (!ok || got != exp) { bf.close(); server.send(500, "application/json", ota_makeFail("WRITE", ("pkt" + String(packets)).c_str(), packets)); return; }
+    sent += (uint32_t)r2; packets++;
+  }
+  bf.close();
+  memset(pkt, 0, 64); pkt[0] = 0xAB; isp_send(pkt);
+  delay(2500); while (Serial.available()) Serial.read();
+  sendToM031_JIG_8CP("VR", "");
+  String avr = readJIG8CP("VR", 3000);
+  bool vmatch = (avr.length() > 0 && avr == g_ota_expected_ver);
+  String j = String("{\"status\":\"OK\",\"expected_ver\":\"") + g_ota_expected_ver +
+             "\",\"actual_ver\":\"" + avr +
+             "\",\"ver_match\":" + (vmatch ? "true" : "false") +
+             ",\"packets\":" + packets + "}";
+  server.send(200, "application/json", j);
+}
+
+void handleRestart() { server.send(200, "text/plain; charset=UTF-8", "restarting"); delay(500); ESP.restart(); }
+// ===== OTA 區塊結束 =====

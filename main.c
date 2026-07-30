@@ -46,6 +46,13 @@
  *  於 software reset 前完整關閉 USB（中斷源/中斷線/PHY/模組時鐘），
  *  避免跳入 LDROM 後 PHY 殘留導致主機列舉失敗。
  *  開機畫面以黑鍵(PF6) 作為驗證觸發入口（驗證用，正式版應移除）。
+ * V5.5.0 (2026/07/28): [OTA 第3階段 防護] OT 命令新增通電拒絕：
+ *    g_power_state!=0 或實體繼電器(PC7)吸合時，不跳轉 LDROM，回 OT_ERR,PWR，
+ *    避免在監控通電途中誤觸 OTA 導致繼電器狀態與燒錄流程衝突。
+ * V5.5.1 (2026/07/29):[OTA 第3步 燒錄目標]
+ *  1. 新增 VR 命令（2 字元版本查詢），供 ESP32 燒錄後比對 FIRMWARE_VERSION。
+ *	2. OT 命令新增通電拒絕：g_power_state!=0 或繼電器(PC7)吸合時回 OT_ERR,PWR 不跳轉。
+ *	3. 移除開機黑鍵(PF6) OTA 驗證入口，OTA 改由 ESP32 網頁觸發。
  * ===========================================================================================
  */
 
@@ -61,7 +68,7 @@
 // =======================================================
 // [系統版本控制]
 // =======================================================
-#define FIRMWARE_VERSION "V5.4.0"
+#define FIRMWARE_VERSION "V5.5.1"
 
 // =======================================================
 // [系統全域設定與變數]
@@ -82,6 +89,9 @@ volatile uint8_t g_force_alarm_menu = 0;
 char g_szWifiIP[20] = "";
 uint8_t g_u8WifiConnected = 0;
 volatile int g_power_state = 0;
+
+volatile uint8_t g_u8InPowerMonitor  = 0;   // 1 = 正在 Power_Monitor_Loop 內
+volatile uint8_t g_u8RequestEnterPM  = 0;   // ESP32 請求進入 PM 的旗標
 
 typedef enum {
     PWR_SCOPE_NETWORKED = 0,
@@ -675,11 +685,31 @@ void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
         }
     }
 		else if (strcmp(cmd_code, "OT") == 0) {
-        /* [OTA 第2階段 驗證用] 收到 ESP32 的 OTA 請求 → 關 USB + 設 BS + reset 進 LDROM。
-           注意：此命令會立即中斷所有正常功能，第3階段須加防護
-           （例如：通電中拒絕、需附帶驗證碼、僅限特定情境）。 */
-        OTA_Trigger_Jump_LDROM();   /* 不返回 */
+				/* [V5.5.0] 通電中拒絕跳轉（第二層防護；第一層在 ESP32 強制 PW OFF） */
+				if (g_power_state != 0 || (PC->DOUT & BIT7)) {
+						JIG_8CP_Send_Packet("OT", "ERR,PWR");
+				} else {
+						JIG_8CP_Send_Packet("OT", "OK");
+						OTA_Trigger_Jump_LDROM();   /* 不返回 */
+				}
+		}
+		else if (strcmp(cmd_code, "VR") == 0) {
+				/* [V5.5.0] 版本查詢：回 VR + FIRMWARE_VERSION */
+				JIG_8CP_Send_Packet("VR", FIRMWARE_VERSION);
+		}
+		else if (strcmp(cmd_code, "PM") == 0) {
+    /*  PM?      → 回報是否在 Power Monitor 中（"1" 或 "0"）
+        PM ENTER → 請求進入 Power Monitor（若已在則靜默忽略，不中斷）  */
+    if (strcmp(data, "?") == 0) {
+        JIG_8CP_Send_Packet("PM", g_u8InPowerMonitor ? "1" : "0");
     }
+    else if (strcmp(data, "ENTER") == 0) {
+        if (!g_u8InPowerMonitor) {
+            g_u8RequestEnterPM = 1;   // 不在 PM → 設定旗標，等安全點進入
+        }
+        // 已在 PM → 什麼都不做，不中斷現有 PD 發送行為
+    }
+}
 }
 
 void Process_UART1_JIG_8CP_Parser(void) {
@@ -1141,6 +1171,8 @@ void Time_Set_Menu_Loop(void) {
 
 // --- [V5.3.20 重構] Power_Monitor_Loop：根除幽靈通電與通訊阻塞 ---
 void Power_Monitor_Loop(void) {
+		g_u8InPowerMonitor = 1;          // ★ 新增：標記已進入 PM
+	
     PowerCtx ctx;
     PowerCtx_Init(&ctx, PWR_SCOPE_NETWORKED);
     g_pActiveNetworkedCtx = &ctx;
@@ -1258,6 +1290,8 @@ void Power_Monitor_Loop(void) {
     PC->DOUT &= ~BIT7; g_power_state = 0; 
     g_pActiveNetworkedCtx = NULL; 
     UI_Clear(); Safe_Print_OLED(0, "Monitor End"); UI_Update(); Delay_ms(1000);
+		g_u8InPowerMonitor = 0;          // ★ 新增：標記已離開 PM
+    g_u8RequestEnterPM = 0;          // ★ 新增：清除可能殘留的請求
 }
 // =======================================================
 // [各式監控 UI 介面] - PWR_SCOPE_ISOLATED：完全獨立情境，天生不受 WEB CF/PW 影響
@@ -1786,22 +1820,20 @@ int main(void) {
     
     while(1) {
         Global_Background_Tasks(); 
-        if ((PF->PIN & BIT5) == 0) { 
-            Delay_ms(50); 
-            if ((PF->PIN & BIT5) == 0) {
-                JigBeep(200); 
-                while ((PF->PIN & BIT5) == 0) { Global_Background_Tasks(); Delay_ms(10); }
-                break; 
-            }
-        }
-				// [OTA 第1階段驗證] 黑鍵(PF6)：關 USB 並跳入 LDROM（驗證用入口）
-        if ((PF->PIN & BIT6) == 0) {
-            Delay_ms(50);
-            if ((PF->PIN & BIT6) == 0) {
-                JigForceBeep(300);
-                OTA_Trigger_Jump_LDROM();            // 不返回
-            }
-        }
+    // ★ 新增：Web 請求進入 PM → 跳過開機等待，直接進選單（選單會立刻跳入 PM）
+				if (g_u8RequestEnterPM) {
+						JigBeep(200);
+						break;
+				}
+
+				if ((PF->PIN & BIT5) == 0) {
+						Delay_ms(50);
+						if ((PF->PIN & BIT5) == 0) {
+								JigBeep(200);
+								while ((PF->PIN & BIT5) == 0) { Global_Background_Tasks(); Delay_ms(10); }
+								break;
+						}
+				}
         Delay_ms(15);
     }
     JIG_8CP_Send_Packet("AL", "?");
@@ -1815,7 +1847,13 @@ int main(void) {
     
     while(1) {
         Global_Background_Tasks(); 
-        if (g_force_alarm_menu) { current_idx = 4; Time_Set_Menu_Loop(); continue; } 
+				// ★ 新增：Web 請求進入 PM → 直接跳入 Power_Monitor_Loop
+				if (g_u8RequestEnterPM) {
+						g_u8RequestEnterPM = 0;
+						Power_Monitor_Loop();
+						continue;   // PM 結束後回到選單
+				}
+				if (g_force_alarm_menu) { current_idx = 4; Time_Set_Menu_Loop(); continue; } 
         char menu_title[64];
         snprintf(menu_title, sizeof(menu_title), "Select Function (%s)", FIRMWARE_VERSION);
         UI_Draw_Menu_State(menu_title, menu_items, NUM_ITEMS, current_idx);
@@ -1867,7 +1905,13 @@ int main(void) {
             else if (current_idx == 6) {
                 int exit_usb_test = 0;
                 while(1) {
-                    Global_Background_Tasks(); if (g_force_alarm_menu) break;
+                    Global_Background_Tasks(); 
+										// ★ 新增：Web 請求進入 PM → 跳出內層，由外層處理
+										if (g_u8RequestEnterPM) { selected = 0; break; }
+
+										if (g_force_alarm_menu) { selected = 2; break; }
+										// ... 原有藍/綠/黃按鈕邏輯不變 ...
+//										if (g_force_alarm_menu) break;
                     UI_Clear(); Safe_Print_OLED_Smooth(0, 0, 63, 0x0F, "USBHID SET");
                     Safe_Print_OLED_Smooth(16, 16, 63, g_u8UsbHidAppendCR ? 0x0F : 0x04, " Add CR  : %s", g_u8UsbHidAppendCR ? "ON " : "OFF");
                     Safe_Print_OLED_Smooth(32, 16, 63, g_u8UsbHidSmartCaps ? 0x0F : 0x04, " SyncCaps: %s", g_u8UsbHidSmartCaps ? "ON " : "OFF");

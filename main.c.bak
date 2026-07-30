@@ -46,6 +46,13 @@
  *  於 software reset 前完整關閉 USB（中斷源/中斷線/PHY/模組時鐘），
  *  避免跳入 LDROM 後 PHY 殘留導致主機列舉失敗。
  *  開機畫面以黑鍵(PF6) 作為驗證觸發入口（驗證用，正式版應移除）。
+ * V5.5.0 (2026/07/28): [OTA 第3階段 防護] OT 命令新增通電拒絕：
+ *    g_power_state!=0 或實體繼電器(PC7)吸合時，不跳轉 LDROM，回 OT_ERR,PWR，
+ *    避免在監控通電途中誤觸 OTA 導致繼電器狀態與燒錄流程衝突。
+ * V5.5.1 (2026/07/29):[OTA 第3步 燒錄目標]
+ *  1. 新增 VR 命令（2 字元版本查詢），供 ESP32 燒錄後比對 FIRMWARE_VERSION。
+ *	2. OT 命令新增通電拒絕：g_power_state!=0 或繼電器(PC7)吸合時回 OT_ERR,PWR 不跳轉。
+ *	3. 移除開機黑鍵(PF6) OTA 驗證入口，OTA 改由 ESP32 網頁觸發。
  * ===========================================================================================
  */
 
@@ -61,7 +68,7 @@
 // =======================================================
 // [系統版本控制]
 // =======================================================
-#define FIRMWARE_VERSION "V5.4.0"
+#define FIRMWARE_VERSION "V5.5.1"
 
 // =======================================================
 // [系統全域設定與變數]
@@ -675,11 +682,18 @@ void JIG_8CP_Command_Handler(const char* cmd_code, const char* data) {
         }
     }
 		else if (strcmp(cmd_code, "OT") == 0) {
-        /* [OTA 第2階段 驗證用] 收到 ESP32 的 OTA 請求 → 關 USB + 設 BS + reset 進 LDROM。
-           注意：此命令會立即中斷所有正常功能，第3階段須加防護
-           （例如：通電中拒絕、需附帶驗證碼、僅限特定情境）。 */
-        OTA_Trigger_Jump_LDROM();   /* 不返回 */
-    }
+				/* [V5.5.0] 通電中拒絕跳轉（第二層防護；第一層在 ESP32 強制 PW OFF） */
+				if (g_power_state != 0 || (PC->DOUT & BIT7)) {
+						JIG_8CP_Send_Packet("OT", "ERR,PWR");
+				} else {
+						JIG_8CP_Send_Packet("OT", "OK");
+						OTA_Trigger_Jump_LDROM();   /* 不返回 */
+				}
+		}
+		else if (strcmp(cmd_code, "VR") == 0) {
+				/* [V5.5.0] 版本查詢：回 VR + FIRMWARE_VERSION */
+				JIG_8CP_Send_Packet("VR", FIRMWARE_VERSION);
+		}
 }
 
 void Process_UART1_JIG_8CP_Parser(void) {
@@ -1734,36 +1748,33 @@ void UART1_JIG_8CP_Test(void) {
 
 void OTA_Trigger_Jump_LDROM(void)
 {
-    // 0. reset 前最後足跡：經 UART0 印出，證明 APROM 確實執行至此
+    /* 0. 跳轉前強制斷電，OTA 途中繼電器不可吸合 */
+    PC->DOUT &= ~BIT7;
+
+    /* 1. 經 UART0 印出最後足跡 */
     {
-			    /* [OTA 第2階段 安全補強] 跳轉前強制斷電，OTA 途中繼電器不可吸合 */
-				PC->DOUT &= ~BIT7;
         const char *msg = "OTA_JUMP_LDROM\r\n";
         UART_Write(UART0, (uint8_t *)msg, strlen(msg));
         while (!(UART0->FIFOSTS & UART_FIFOSTS_TXEMPTY_Msk)) { }
     }
 
-    // 1. 關閉 USB（關鍵：釋放 D+ 上拉，防止跳 LDROM 後主機報「無法辨識的裝置」）
-    //    M032SE3AE 的 USB PHY 控制寄存器是 ATTR，不是 PHYCTL
-    USBD->INTEN = 0;                          // 關所有 USB 中斷源
-    NVIC_DisableIRQ(USBD_IRQn);               // 關 USB 中斷線
-    USBD->ATTR = 0;                           // 關 USBEN、PHYEN、DPPUEN（與 USBD_Start 反向）
-    CLK_DisableModuleClock(USBD_MODULE);      // 關 USB 模組時鐘
+    /* 2. 關閉 USB（釋放 D+ 上拉，防止跳 LDROM 後主機報「無法辨識的裝置」） */
+    USBD->INTEN = 0;
+    NVIC_DisableIRQ(USBD_IRQn);
+    USBD->ATTR = 0;
+    CLK_DisableModuleClock(USBD_MODULE);
 
-    // 2. 關閉其餘中斷，避免 reset 瞬間殘留 ISR 干擾開機
+    /* 3. 關閉其餘中斷 */
     NVIC_DisableIRQ(UART13_IRQn);
     NVIC_DisableIRQ(UART02_IRQn);
     NVIC_DisableIRQ(TMR1_IRQn);
     __disable_irq();
 
-    // 3. 設 BS=1（下次開機自 LDROM）
+    /* 4. 設 BS=1（下次開機自 LDROM），立即 reset，不延遲 */
     SYS_UnlockReg();
     FMC->ISPCTL |= FMC_ISPCTL_ISPEN_Msk;
     FMC->ISPCTL |= FMC_ISPCTL_BS_Msk;
-    /* 不延遲：設 BS 後立即 reset，使 M031 在 ESP32 之 delay(100) 窗口內進入 LDROM */
-    SCB->AIRCR = (0x05FA0000UL | 0x00000004UL);
-    // 4. software reset
-    SCB->AIRCR = (0x05FA0000UL | 0x00000004UL);
+    SCB->AIRCR = (0x05FA0000UL | 0x00000004UL);   /* software reset */
     while (1) { }
 }
 
@@ -1795,14 +1806,6 @@ int main(void) {
                 JigBeep(200); 
                 while ((PF->PIN & BIT5) == 0) { Global_Background_Tasks(); Delay_ms(10); }
                 break; 
-            }
-        }
-				// [OTA 第1階段驗證] 黑鍵(PF6)：關 USB 並跳入 LDROM（驗證用入口）
-        if ((PF->PIN & BIT6) == 0) {
-            Delay_ms(50);
-            if ((PF->PIN & BIT6) == 0) {
-                JigForceBeep(300);
-                OTA_Trigger_Jump_LDROM();            // 不返回
             }
         }
         Delay_ms(15);
