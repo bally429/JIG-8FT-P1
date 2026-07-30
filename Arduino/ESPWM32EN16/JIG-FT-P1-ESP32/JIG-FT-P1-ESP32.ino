@@ -17,9 +17,10 @@ V4.2  2026/07/29 [M031 OTA 第3步] 新增 /m031_ota_burn 真正燒錄：經 LDR
       同步阻塞於 handler（天然隔離 JIG_8CP 背景流量）；首包長 timeout 容納整片擦除；
       每包 checksum 比對＝寫後驗證；燒完 RUN_APROM + VR 版本比對 + 雙 reset 同步。
       新增 /api/restart；前端預估進度條。通電強制斷電雙層防護。
+V4.3  2026/07/30  🌐 網路備援設定 介面優化
 ===========================================================================================
 */
-#define FIRMWARE_VERSION  "V4.2"
+#define FIRMWARE_VERSION  "V4.3"
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -178,8 +179,10 @@ void setup() {
   server.on("/api/power", HTTP_POST, handleApiPower); 
   server.on("/api/saveConfig", HTTP_POST, handleApiSaveConfig);
   server.on("/api/downloadCSV", handleDownloadCSV);
-  server.on("/api/isp_test", HTTP_GET, handleIspTest);   // [OTA 第2階段] M031 LDROM 握手驗證
-  
+  // server.on("/api/isp_test", HTTP_GET, handleIspTest);   // [OTA 第2階段] M031 LDROM 握手驗證
+  server.on("/api/wifi/scan",        HTTP_GET, handleApiWifiScan);
+  server.on("/api/wifi/scan_result", HTTP_GET, handleApiWifiScanResult);
+
   // SD卡路由
   server.on("/sdcard", handleSdCard);
   server.on("/sd/browse", handleSdBrowse);
@@ -667,12 +670,255 @@ void handleApiSaveAlarms() {
   }
   saveAlarmsConfig(); server.send(200, "text/plain; charset=UTF-8", "OK");
 }
+// ===== [Wi-Fi 設定頁重做] 掃描 API + JSON 轉義 =====
+static String jsonEsc(String s) {
+  s.replace("\\", "\\\\");
+  s.replace("\"", "\\\"");
+  s.replace("\r", " ");
+  s.replace("\n", " ");
+  return s;
+}
 
+// 觸發非同步掃描（不阻塞 loop，對當前連線較溫和）
+void handleApiWifiScan() {
+  WiFi.scanNetworks(true);   // async = true
+  server.send(200, "application/json", "{\"state\":\"scanning\"}");
+}
+
+// 輪詢掃描結果
+void handleApiWifiScanResult() {
+  int n = WiFi.scanComplete();
+  if (n == -1) { server.send(200, "application/json", "{\"state\":\"scanning\"}"); return; }
+  if (n <  0)  { server.send(200, "application/json", "{\"state\":\"idle\",\"count\":0,\"nets\":[]}"); return; }
+  String j = "{\"state\":\"done\",\"count\":" + String(n) + ",\"nets\":[";
+  bool first = true;
+  for (int i = 0; i < n; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid.length() == 0) continue;                 // 過濾隱藏/空 SSID
+    if (!first) j += ","; first = false;
+    int rssi = WiFi.RSSI(i);
+    int enc  = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? 0 : 1;
+    j += "{\"ssid\":\"" + jsonEsc(ssid) + "\",\"rssi\":" + String(rssi) + ",\"enc\":" + String(enc) + "}";
+  }
+  j += "]}";
+  WiFi.scanDelete();
+  server.send(200, "application/json", j);
+}
 void handleWiFiSet() {
-  String html = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>網路備援設定</title><style>body{font-family:Arial; padding:20px; background:#f4f4f4;} .card{background:#fff; padding:15px; margin-bottom:15px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);} .back-btn{display:inline-block; margin-bottom:15px; text-decoration:none; color:#0056b3; font-weight:bold;} </style></head><body><a href='/' class='back-btn'>⬅ 返回首頁</a><h2>網路備援設定</h2><form action='/save' method='POST'>";
-  html += "<div class='card'><h3>全域使用者 (User)</h3><input type='text' name='globalUser' value='" + globalUser + "' style='width:100%; padding:8px;'></div>";
-  for (int i = 0; i < 5; i++) { html += "<div class='card'><h3>備援組 " + String(i + 1) + "</h3>網路名稱 (SSID):<br><input type='text' name='ssid" + String(i + 1) + "' value='" + wifiList[i].ssid + "' style='width:100%; padding:8px; margin-bottom:10px;'><br>密碼 (Password):<br><input type='text' name='pass" + String(i + 1) + "' value='" + wifiList[i].pass + "' style='width:100%; padding:8px;'><br></div>"; }
-  html += "<input type='submit' value='💾 儲存並重啟設備' style='width:100%; padding:15px; font-size:18px; background:#4CAF50; color:white; border:none; border-radius:8px; cursor:pointer;'></form></body></html>";
+  // ---- 組裝初始資料 JSON（User / 當前連線 / 5 備援槽）----
+  String initJson = "{\"user\":\"" + jsonEsc(globalUser) + "\""
+    ",\"cur\":{\"ssid\":\"" + jsonEsc(WiFi.SSID()) + "\","
+              "\"rssi\":" + String((int)WiFi.RSSI()) + ","
+              "\"ip\":\"" + (isAPMode ? WiFi.softAPIP() : WiFi.localIP()).toString() + "\","
+              "\"ap\":" + (isAPMode ? "true" : "false") + "}"
+    ",\"slots\":[";
+  for (int i = 0; i < 5; i++) {
+    if (i) initJson += ",";
+    initJson += "{\"ssid\":\"" + jsonEsc(wifiList[i].ssid) + "\",\"pass\":\"" + jsonEsc(wifiList[i].pass) + "\"}";
+  }
+  initJson += "]}";
+
+  String html = R"rawliteral(<!DOCTYPE html><html lang="zh-Hant"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Wi‑Fi 備援設定</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0d131b;--panel:#141b24;--panel2:#19222d;--line:rgba(255,255,255,.07);--line2:rgba(255,255,255,.12);
+--ink:#e8eef5;--dim:#93a1b2;--faint:#5d6b7c;--teal:#2dd4bf;--sky:#38bdf8;--danger:#f87171;
+--disp:"Sora","Noto Sans TC",sans-serif;--body:"Noto Sans TC","Sora",system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace;}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html{scroll-behavior:smooth}
+body{font-family:var(--body);color:var(--ink);background:var(--bg);min-height:100vh;padding-bottom:120px;
+background-image:radial-gradient(820px 460px at 88% -6%,rgba(45,212,191,.10),transparent 60%),radial-gradient(720px 420px at -8% 8%,rgba(56,189,248,.09),transparent 58%),linear-gradient(transparent 31px,rgba(255,255,255,.02) 32px),linear-gradient(90deg,transparent 31px,rgba(255,255,255,.02) 32px);background-size:auto,auto,32px 32px,32px 32px;}
+.wrap{max-width:640px;margin:0 auto;padding:0 16px}
+nav{position:sticky;top:0;z-index:30;display:flex;align-items:center;justify-content:space-between;
+padding:14px 16px;backdrop-filter:blur(14px);background:rgba(13,19,27,.72);border-bottom:1px solid var(--line)}
+nav .t{font-family:var(--disp);font-weight:700;font-size:1.05rem;letter-spacing:.01em}
+.iconbtn{width:42px;height:42px;border-radius:50%;border:1px solid var(--line2);background:var(--panel);
+color:var(--ink);display:grid;place-items:center;cursor:pointer;transition:.2s;text-decoration:none}
+.iconbtn:hover{border-color:var(--teal);color:var(--teal);transform:translateY(-1px)}
+.iconbtn.spin svg{animation:spin 1.1s linear infinite}
+nav .r{display:flex;gap:8px;align-items:center}
+.sec{margin-top:22px;opacity:0;transform:translateY(16px)}
+.sec.in{animation:rise .6s ease forwards}
+.sec-h{display:flex;align-items:baseline;justify-content:space-between;margin:0 2px 10px}
+.sec-h h2{font-family:var(--disp);font-size:.82rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
+.sec-h .hint{font-size:.72rem;color:var(--faint)}
+.card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:16px;padding:16px;position:relative;overflow:hidden}
+/* 狀態卡 */
+.status{display:flex;align-items:center;gap:14px}
+.status .gly{flex:0 0 auto}
+.status .mid{flex:1;min-width:0}
+.status .ssid{font-family:var(--disp);font-weight:700;font-size:1.12rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.status .meta{display:flex;gap:8px;align-items:center;margin-top:4px;flex-wrap:wrap}
+.badge{font-family:var(--mono);font-size:.66rem;letter-spacing:.08em;padding:3px 8px;border-radius:999px;border:1px solid var(--line2);color:var(--dim)}
+.badge.ap{color:#fbbf24;border-color:rgba(251,191,36,.4)}
+.badge.lvl{border:none;color:var(--ink)}
+.status .ip{font-family:var(--mono);font-size:.82rem;color:var(--sky)}
+.live{position:absolute;top:14px;right:16px;display:flex;align-items:center;gap:6px;font-size:.66rem;color:var(--dim);font-family:var(--mono)}
+.live .dot{width:8px;height:8px;border-radius:50%;background:var(--teal);box-shadow:0 0 0 0 rgba(45,212,191,.6);animation:pulse 2s infinite}
+.live.ap .dot{background:#fbbf24;box-shadow:0 0 0 0 rgba(251,191,36,.6)}
+/* 表單元素 */
+label.fld{display:block;font-size:.74rem;color:var(--dim);margin-bottom:7px;letter-spacing:.02em}
+.inp{width:100%;background:#0c1219;border:1px solid var(--line2);border-radius:11px;color:var(--ink);
+font-family:var(--body);font-size:.95rem;padding:12px 13px;transition:.18s;outline:none}
+.inp:focus{border-color:var(--teal);box-shadow:0 0 0 3px rgba(45,212,191,.14)}
+.inp.mono{font-family:var(--mono)}
+.pw{position:relative}
+.pw .inp{padding-right:44px}
+.eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);width:32px;height:32px;border:none;background:transparent;color:var(--faint);cursor:pointer;display:grid;place-items:center;border-radius:8px}
+.eye:hover{color:var(--teal)}
+.note{font-size:.72rem;color:var(--faint);margin-top:8px;line-height:1.5}
+/* 備援槽 */
+.slot{margin-bottom:12px;border:1px solid var(--line);border-radius:15px;background:var(--panel);overflow:hidden;transition:.2s}
+.slot.active{border-color:var(--teal);box-shadow:0 0 0 1px var(--teal),0 10px 30px -16px rgba(45,212,191,.5)}
+.slot.flash{animation:flash .7s ease}
+.slot-head{display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;user-select:none}
+.slot-num{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;font-family:var(--disp);font-weight:700;font-size:.82rem;
+background:var(--panel2);border:1px solid var(--line2);color:var(--dim);flex:0 0 auto}
+.slot.active .slot-num{background:var(--teal);color:#06231f;border-color:var(--teal)}
+.slot-title{font-family:var(--disp);font-weight:600;font-size:.92rem;flex:1}
+.slot-target{font-family:var(--mono);font-size:.62rem;letter-spacing:.08em;color:var(--teal);opacity:0;transition:.2s}
+.slot.active .slot-target{opacity:1}
+.slot-gly{flex:0 0 auto;display:flex;align-items:center;gap:6px}
+.slot-gly .lt{font-size:.66rem;color:var(--faint);font-family:var(--mono)}
+.slot-body{padding:0 14px 14px;display:grid;gap:10px}
+/* 附近網路列表 */
+.nets{background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+.net{display:flex;align-items:center;gap:12px;padding:13px 15px;border-bottom:1px solid var(--line);cursor:pointer;transition:.16s}
+.net:last-child{border-bottom:none}
+.net:hover{background:linear-gradient(90deg,rgba(45,212,191,.08),transparent);transform:translateX(3px)}
+.net .nm{flex:1;min-width:0;font-weight:500;font-size:.96rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:8px}
+.net .lk{color:var(--faint);flex:0 0 auto}
+.net .rg{display:flex;align-items:center;gap:9px;flex:0 0 auto}
+.net .dbm{font-family:var(--mono);font-size:.72rem;color:var(--faint);min-width:42px;text-align:right}
+.empty{padding:30px 16px;text-align:center;color:var(--faint);font-size:.85rem}
+/* 雷達 */
+.radar{position:relative;width:88px;height:88px;margin:24px auto}
+.radar .ring{position:absolute;inset:0;border-radius:50%;border:1px solid rgba(45,212,191,.22);animation:rpulse 2.2s ease-out infinite}
+.radar .ring:nth-child(2){animation-delay:.7s}.radar .ring:nth-child(3){animation-delay:1.4s}
+.radar .sweep{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,rgba(45,212,191,.4),transparent 75deg);animation:spin 1.7s linear infinite;-webkit-mask:radial-gradient(circle,transparent 28%,#000 30%);mask:radial-gradient(circle,transparent 28%,#000 30%)}
+.radar .core{position:absolute;left:50%;top:50%;width:8px;height:8px;border-radius:50%;background:var(--teal);transform:translate(-50%,-50%);box-shadow:0 0 12px var(--teal)}
+.radar-txt{text-align:center;color:var(--dim);font-size:.8rem;font-family:var(--mono);letter-spacing:.06em}
+/* 儲存列 */
+.savebar{position:fixed;left:0;right:0;bottom:0;z-index:25;padding:14px 16px calc(14px + env(safe-area-inset-bottom));
+background:linear-gradient(180deg,transparent,rgba(13,19,27,.92) 38%);backdrop-filter:blur(8px)}
+.savebar .wrap{display:grid;gap:8px}
+.savebtn{width:100%;border:none;border-radius:14px;padding:15px;font-family:var(--disp);font-weight:700;font-size:1rem;color:#06231f;
+background:linear-gradient(120deg,var(--teal),var(--sky));cursor:pointer;position:relative;overflow:hidden;transition:.18s;letter-spacing:.02em}
+.savebtn:hover{transform:translateY(-2px);box-shadow:0 14px 30px -12px rgba(45,212,191,.6)}
+.savebtn:active{transform:translateY(0)}
+.savebtn::after{content:"";position:absolute;top:0;left:-60%;width:40%;height:100%;background:linear-gradient(120deg,transparent,rgba(255,255,255,.5),transparent);transform:skewX(-20deg);transition:left .6s}
+.savebtn:hover::after{left:130%}
+.savebtn:disabled{opacity:.6;cursor:wait;transform:none}
+.savewarn{font-size:.7rem;color:var(--faint);text-align:center;line-height:1.5}
+/* toast */
+#toast{position:fixed;left:50%;bottom:96px;transform:translate(-50%,20px);z-index:60;background:var(--panel2);border:1px solid var(--line2);
+color:var(--ink);padding:11px 18px;border-radius:12px;font-size:.85rem;box-shadow:0 12px 30px -10px #000;opacity:0;pointer-events:none;transition:.3s;max-width:88vw;text-align:center}
+#toast.show{opacity:1;transform:translate(-50%,0)}
+#toast.ok{border-color:rgba(45,212,191,.5)}
+#toast.err{border-color:rgba(248,113,113,.5)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes rise{to{opacity:1;transform:none}}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(45,212,191,.5)}70%{box-shadow:0 0 0 8px transparent}100%{box-shadow:0 0 0 0 transparent}}
+@keyframes rpulse{0%{transform:scale(.4);opacity:.9}100%{transform:scale(1);opacity:0}}
+@keyframes flash{0%{background:rgba(45,212,191,.22)}100%{background:var(--panel)}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important}}
+</style></head><body>
+<nav>
+  <a class="iconbtn" href="/" aria-label="返回"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></a>
+  <span class="t">Wi‑Fi 備援設定</span>
+  <span class="r"><button class="iconbtn" id="scanBtn" aria-label="掃描"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1.2" fill="currentColor" stroke="none"/></svg></button></span>
+</nav>
+<div class="wrap">
+  <section class="sec" id="secStatus"></section>
+  <section class="sec" id="secUser"></section>
+  <section class="sec"><div class="sec-h"><h2>備援網路</h2><span class="hint">開機依序自動嘗試 · 點選卡片設為填入目標</span></div><div id="slots"></div></section>
+  <section class="sec"><div class="sec-h"><h2>附近網路</h2><span class="hint" id="netHint">—</span></div><div class="nets" id="nets"></div></section>
+</div>
+<div class="savebar"><div class="wrap">
+  <button class="savebtn" id="saveBtn">儲存並重啟裝置</button>
+  <div class="savewarn">儲存後裝置將重啟，約 10 秒後以新設定重新上線；若新設定無法連線，將回落 AP 熱點 <b>JIG_8FT_P1_WIFIset</b>。</div>
+</div></div>
+<div id="toast"></div>
+<script>const INIT=)rawliteral" + initJson + R"rawliteral(;
+const LCOL=['#64748b','#f87171','#f59e0b','#84cc16','#22c55e'];
+const LTXT=['—','微弱','普通','良好','極佳'];
+function lvl(r){if(r==null)return 0;if(r>=-55)return 4;if(r>=-67)return 3;if(r>=-78)return 2;return 1;}
+function glyph(rssi,px){px=px||24;const n=lvl(rssi),col=LCOL[n],k=0.7071,cx=12,cy=18,rs=[4,7,10,13];let a='';
+ for(let i=0;i<4;i++){const r=rs[i],lx=(cx-k*r).toFixed(2),ly=(cy-k*r).toFixed(2),rx=(cx+k*r).toFixed(2),ry=(cy-k*r).toFixed(2);
+ const on=n>0&&i<n,c=on?col:'rgba(148,163,184,.22)';a+='<path d="M'+lx+' '+ly+' A '+r+' '+r+' 0 0 1 '+rx+' '+ry+'" fill="none" stroke="'+c+'" stroke-width="2.1" stroke-linecap="round"/>';}
+ const d=n>0?col:'rgba(148,163,184,.35)';
+ return '<svg width="'+px+'" height="'+px+'" viewBox="0 0 24 24" aria-label="'+LTXT[n]+'">'+a+'<circle cx="'+cx+'" cy="'+cy+'" r="1.7" fill="'+d+'"/></svg>';}
+const lock='<svg class="lk" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+const eyeOpen='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>';
+const eyeOff='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l18 18"/><path d="M10.6 5.1A10.9 10.9 0 0 1 12 5c6.5 0 10 7 10 7a18 18 0 0 1-3.2 4M6.6 6.6A18 18 0 0 0 2 12s3.5 7 10 7a10.9 10.9 0 0 0 4-.8"/></svg>';
+let slots=INIT.slots.map(s=>({ssid:s.ssid,pass:s.pass}));
+let active=0,lastNets=null,scanning=false;
+(function(){for(let i=0;i<5;i++){if(!slots[i].ssid){active=i;break;}}})();
+const $=s=>document.querySelector(s);
+function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function rssiFor(ssid){if(!ssid||!lastNets)return null;const m=lastNets.find(n=>n.ssid===ssid);return m?m.rssi:null;}
+let toastT;function toast(msg,kind){const t=$('#toast');t.textContent=msg;t.className='show '+(kind||'');clearTimeout(toastT);toastT=setTimeout(()=>t.className='',2600);}
+function renderStatus(){const c=INIT.cur,ap=!!c.ap,n=ap?0:lvl(c.rssi);
+ $('#secStatus').innerHTML='<div class="card"><div class="live '+(ap?'ap':'')+'"><span class="dot"></span>'+(ap?'AP 熱點':'ONLINE')+'</div>'+
+ '<div class="status"><span class="gly">'+glyph(ap?null:c.rssi,40)+'</span><div class="mid">'+
+ '<div class="ssid">'+(ap?'JIG_8FT_P1_WIFIset':esc(c.ssid||'（未連線）'))+'</div>'+
+ '<div class="meta"><span class="badge '+(ap?'ap':'')+'">'+(ap?'AP MODE':'STA')+'</span>'+
+ (ap?'':('<span class="badge lvl" style="color:'+LCOL[n]+'">'+LTXT[n]+' · '+c.rssi+' dBm</span>'))+
+ '<span class="ip">'+esc(c.ip)+'</span></div></div></div></div>';}
+function renderUser(){$('#secUser').innerHTML='<div class="card"><label class="fld">全域使用者 (User)</label>'+
+ '<input class="inp" id="userInp" value="'+esc(INIT.user)+'" placeholder="例如：BALLY">'+
+ '<div class="note">顯示於裝置歡迎訊息與測試紀錄，留空則顯示預設問候語。</div></div>';}
+function renderSlots(){const wrap=$('#slots');wrap.innerHTML='';
+ slots.forEach((s,i)=>{const r=rssiFor(s.ssid),n=lvl(r);
+  const el=document.createElement('div');el.className='slot'+(i===active?' active':'');el.dataset.i=i;
+  el.innerHTML='<div class="slot-head" data-head="'+i+'"><span class="slot-num">'+(i+1)+'</span>'+
+   '<span class="slot-title">備援 '+(i+1)+'</span><span class="slot-target">● 填入目標</span>'+
+   '<span class="slot-gly">'+glyph(r,22)+'<span class="lt">'+(s.ssid?(r!=null?LTXT[n]:'未掃描'):'空')+'</span></span></div>'+
+   '<div class="slot-body"><div><label class="fld">網路名稱 (SSID)</label><input class="inp mono" data-ssid="'+i+'" value="'+esc(s.ssid)+'" placeholder="手動輸入或從下方選取"></div>'+
+   '<div><label class="fld">密碼 (Password)</label><div class="pw"><input class="inp mono" type="password" data-pass="'+i+'" value="'+esc(s.pass)+'" placeholder="開放網路可留空"><button class="eye" data-eye="'+i+'" type="button">'+eyeOff+'</button></div></div></div>';
+  wrap.appendChild(el);});
+ wrap.querySelectorAll('[data-head]').forEach(h=>h.onclick=()=>{active=+h.dataset.head;renderSlots();});
+ wrap.querySelectorAll('[data-ssid]').forEach(inp=>inp.oninput=e=>{slots[+e.target.dataset.ssid].ssid=e.target.value;refreshSlotGly(+e.target.dataset.ssid);});
+ wrap.querySelectorAll('[data-pass]').forEach(inp=>inp.oninput=e=>{slots[+e.target.dataset.pass].pass=e.target.value;});
+ wrap.querySelectorAll('[data-eye]').forEach(b=>b.onclick=()=>{const inp=wrap.querySelector('[data-pass="'+b.dataset.eye+'"]');const show=inp.type==='password';inp.type=show?'text':'password';b.innerHTML=show?eyeOpen:eyeOff;});}
+function refreshSlotGly(i){const el=$('#slots').children[i];if(!el)return;const r=rssiFor(slots[i].ssid),n=lvl(r);
+ el.querySelector('.slot-gly').innerHTML=glyph(r,22)+'<span class="lt">'+(slots[i].ssid?(r!=null?LTXT[n]:'未掃描'):'空')+'</span>';}
+function renderNets(){const box=$('#nets');
+ if(scanning){box.innerHTML='<div class="empty"><div class="radar"><div class="ring"></div><div class="ring"></div><div class="ring"></div><div class="sweep"></div><div class="core"></div></div><div class="radar-txt">掃描附近網路…</div></div>';$('#netHint').textContent='';return;}
+ if(!lastNets){box.innerHTML='<div class="empty">點右上角雷達按鈕掃描附近網路</div>';$('#netHint').textContent='';return;}
+ if(!lastNets.length){box.innerHTML='<div class="empty">未掃描到任何網路</div>';$('#netHint').textContent='0 個';return;}
+ $('#netHint').textContent=lastNets.length+' 個 · 由強到弱';
+ box.innerHTML='';lastNets.forEach((nt,idx)=>{const row=document.createElement('div');row.className='net';row.dataset.idx=idx;
+  row.innerHTML='<span class="nm">'+esc(nt.ssid)+(nt.enc?lock:'')+'</span><span class="rg">'+glyph(nt.rssi,22)+'<span class="dbm" title="'+nt.rssi+' dBm">'+nt.rssi+'</span></span>';
+  row.onclick=()=>pickNet(nt);box.appendChild(row);});}
+function pickNet(nt){slots[active].ssid=nt.ssid;renderSlots();
+ const pe=$('#slots').querySelector('[data-pass="'+active+'"]');if(pe){pe.focus();pe.type='text';const eb=$('#slots').querySelector('[data-eye="'+active+'"]');if(eb)eb.innerHTML=eyeOpen;}
+ const card=$('#slots').children[active];card.classList.remove('flash');void card.offsetWidth;card.classList.add('flash');
+ toast('已填入「'+nt.ssid+'」→ 備援 '+(active+1),'ok');}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function doScan(){if(scanning)return;scanning=true;$('#scanBtn').classList.add('spin');renderNets();
+ try{await fetch('/api/wifi/scan',{cache:'no-store'});}catch(e){}
+ const t0=Date.now();let nets=null;
+ while(Date.now()-t0<18000){await sleep(1200);try{const r=await fetch('/api/wifi/scan_result',{cache:'no-store'});const j=await r.json();
+   if(j.state==='done'){nets=j.nets;break;}if(j.state==='idle')break;}catch(e){}}
+ scanning=false;$('#scanBtn').classList.remove('spin');
+ if(nets){nets.sort((a,b)=>b.rssi-a.rssi);lastNets=nets;renderNets();renderSlots();toast('掃描完成，找到 '+nets.length+' 個網路','ok');}
+ else{renderNets();toast('掃描逾時，請重試','err');}}
+async function doSave(){const btn=$('#saveBtn');btn.disabled=true;btn.textContent='儲存中…';
+ const sp=new URLSearchParams();sp.append('globalUser',$('#userInp').value);
+ for(let i=0;i<5;i++){sp.append('ssid'+(i+1),slots[i].ssid);sp.append('pass'+(i+1),slots[i].pass);}
+ try{await fetch('/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:sp});}catch(e){}
+ btn.textContent='已送出 · 裝置重啟中';toast('設定已儲存，裝置正在重啟…','ok');
+ setTimeout(()=>{btn.textContent='請重新整理頁面';btn.disabled=false;},4000);}
+document.addEventListener('DOMContentLoaded',()=>{renderStatus();renderUser();renderSlots();renderNets();
+ $('#scanBtn').onclick=doScan;$('#saveBtn').onclick=doSave;
+ const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}}),{threshold:.12});
+ document.querySelectorAll('.sec').forEach((s,i)=>{s.style.animationDelay=(i*.07)+'s';io.observe(s);});
+ setTimeout(doScan,500);});
+</script></body></html>)rawliteral";
   server.send(200, "text/html; charset=UTF-8", html);
 }
 
@@ -944,59 +1190,59 @@ static bool isp_recv(uint8_t *buf, uint32_t timeout_ms) {
     return true;
 }
 
-void handleIspTest() {
-    String r = "=== M031 LDROM ISP 握手測試 (第2階段, 不寫Flash) ===\r\n";
+// void handleIspTest() {
+//     String r = "=== M031 LDROM ISP 握手測試 (第2階段, 不寫Flash) ===\r\n";
 
-    // 0. 清空 Serial RX，避免 JIG_8CP 殘留字元混入
-    while (Serial.available()) Serial.read();
+//     // 0. 清空 Serial RX，避免 JIG_8CP 殘留字元混入
+//     while (Serial.available()) Serial.read();
 
-    // 1. 送 JIG_8CP "OT" 觸發 M031 進 LDROM（此刻 M031 仍在 APROM，認 JIG_8CP）
-    sendToM031_JIG_8CP("OT", "");
-    delay(100);   // 等 M031 收 OT + reset + LDROM 開機 + UART1 就緒（窗口約 reset 後 20~320ms）
-    while (Serial.available()) Serial.read();   // 清掉 reset 期間可能的雜訊
+//     // 1. 送 JIG_8CP "OT" 觸發 M031 進 LDROM（此刻 M031 仍在 APROM，認 JIG_8CP）
+//     sendToM031_JIG_8CP("OT", "");
+//     delay(100);   // 等 M031 收 OT + reset + LDROM 開機 + UART1 就緒（窗口約 reset 後 20~320ms）
+//     while (Serial.available()) Serial.read();   // 清掉 reset 期間可能的雜訊
 
-    // 2. CONNECT
-    uint8_t pkt[ISP_PKT_SIZE] = {0};
-    pkt[0] = 0xAE; pkt[1] = 0x00; pkt[2] = 0x00; pkt[3] = 0x00;   // CMD_CONNECT (LE)
-    uint16_t exp = isp_checksum(pkt);
-    isp_send(pkt);
-    uint8_t resp[ISP_PKT_SIZE];
-    bool ok1 = isp_recv(resp, 500);
-    uint16_t got1 = ok1 ? (uint16_t)(resp[0] | (resp[1] << 8)) : 0xFFFF;
-    r += "[CONNECT] 送出checksum=0x" + String(exp, HEX) +
-         " 收到=0x" + String(got1, HEX) +
-         " => " + String((ok1 && got1 == exp) ? "OK" : "FAIL") + "\r\n";
+//     // 2. CONNECT
+//     uint8_t pkt[ISP_PKT_SIZE] = {0};
+//     pkt[0] = 0xAE; pkt[1] = 0x00; pkt[2] = 0x00; pkt[3] = 0x00;   // CMD_CONNECT (LE)
+//     uint16_t exp = isp_checksum(pkt);
+//     isp_send(pkt);
+//     uint8_t resp[ISP_PKT_SIZE];
+//     bool ok1 = isp_recv(resp, 500);
+//     uint16_t got1 = ok1 ? (uint16_t)(resp[0] | (resp[1] << 8)) : 0xFFFF;
+//     r += "[CONNECT] 送出checksum=0x" + String(exp, HEX) +
+//          " 收到=0x" + String(got1, HEX) +
+//          " => " + String((ok1 && got1 == exp) ? "OK" : "FAIL") + "\r\n";
 
-    // 3. GET_DEVICEID
-    memset(pkt, 0, ISP_PKT_SIZE);
-    pkt[0] = 0xB1; pkt[1] = 0x00; pkt[2] = 0x00; pkt[3] = 0x00;   // CMD_GET_DEVICEID (LE)
-    exp = isp_checksum(pkt);
-    isp_send(pkt);
-    bool ok2 = isp_recv(resp, 500);
-    uint16_t got2 = ok2 ? (uint16_t)(resp[0] | (resp[1] << 8)) : 0xFFFF;
-    uint32_t pdid = ok2 ? ((uint32_t)resp[8] | ((uint32_t)resp[9] << 8) |
-                           ((uint32_t)resp[10] << 16) | ((uint32_t)resp[11] << 24)) : 0;
-    r += "[GET_DEVID] 送出checksum=0x" + String(exp, HEX) +
-         " 收到=0x" + String(got2, HEX) +
-         " => " + String((ok2 && got2 == exp) ? "OK" : "FAIL") + "\r\n";
-    r += "[PDID] 0x" + String(pdid, HEX) +
-         " => " + String((pdid != 0 && pdid != 0xFFFFFFFF) ? "合理(非0/非全F)" : "異常") + "\r\n";
+//     // 3. GET_DEVICEID
+//     memset(pkt, 0, ISP_PKT_SIZE);
+//     pkt[0] = 0xB1; pkt[1] = 0x00; pkt[2] = 0x00; pkt[3] = 0x00;   // CMD_GET_DEVICEID (LE)
+//     exp = isp_checksum(pkt);
+//     isp_send(pkt);
+//     bool ok2 = isp_recv(resp, 500);
+//     uint16_t got2 = ok2 ? (uint16_t)(resp[0] | (resp[1] << 8)) : 0xFFFF;
+//     uint32_t pdid = ok2 ? ((uint32_t)resp[8] | ((uint32_t)resp[9] << 8) |
+//                            ((uint32_t)resp[10] << 16) | ((uint32_t)resp[11] << 24)) : 0;
+//     r += "[GET_DEVID] 送出checksum=0x" + String(exp, HEX) +
+//          " 收到=0x" + String(got2, HEX) +
+//          " => " + String((ok2 && got2 == exp) ? "OK" : "FAIL") + "\r\n";
+//     r += "[PDID] 0x" + String(pdid, HEX) +
+//          " => " + String((pdid != 0 && pdid != 0xFFFFFFFF) ? "合理(非0/非全F)" : "異常") + "\r\n";
 
-    // 4. RUN_APROM 讓 M031 跳回 APROM（此命令【無 response】，不可等）
-    memset(pkt, 0, ISP_PKT_SIZE);
-    pkt[0] = 0xAB; pkt[1] = 0x00; pkt[2] = 0x00; pkt[3] = 0x00;   // CMD_RUN_APROM (LE)
-    isp_send(pkt);
-    delay(200);   // 等 M031 software reset 回 APROM
-    r += "[RUN_APROM] 已送出(無response), 等M031回APROM\r\n";
+//     // 4. RUN_APROM 讓 M031 跳回 APROM（此命令【無 response】，不可等）
+//     memset(pkt, 0, ISP_PKT_SIZE);
+//     pkt[0] = 0xAB; pkt[1] = 0x00; pkt[2] = 0x00; pkt[3] = 0x00;   // CMD_RUN_APROM (LE)
+//     isp_send(pkt);
+//     delay(200);   // 等 M031 software reset 回 APROM
+//     r += "[RUN_APROM] 已送出(無response), 等M031回APROM\r\n";
 
-    // 5. 總判
-    bool pass = ok1 && (got1 == isp_checksum((const uint8_t[]){0xAE,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}))
-                    && ok2 && (got2 == isp_checksum((const uint8_t[]){0xB1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}))
-                    && (pdid != 0 && pdid != 0xFFFFFFFF);
-    r += "\r\n>>> 第2階段 " + String(pass ? "PASS <<<" : "FAIL <<<") + "\r\n";
+//     // 5. 總判
+//     bool pass = ok1 && (got1 == isp_checksum((const uint8_t[]){0xAE,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}))
+//                     && ok2 && (got2 == isp_checksum((const uint8_t[]){0xB1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}))
+//                     && (pdid != 0 && pdid != 0xFFFFFFFF);
+//     r += "\r\n>>> 第2階段 " + String(pass ? "PASS <<<" : "FAIL <<<") + "\r\n";
 
-    server.send(200, "text/plain; charset=utf-8", r);
-}
+//     server.send(200, "text/plain; charset=utf-8", r);
+// }
 
 // =======================================================
 // [OTA 區塊 V4.2] 從此行整段覆蓋到檔案結尾
