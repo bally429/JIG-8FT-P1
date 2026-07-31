@@ -719,12 +719,12 @@ void handleWiFiSet() {
   initJson += "]}";
 
   String html = R"rawliteral(<!DOCTYPE html><html lang="zh-Hant"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta charset="UTF-8"><meta name="color-scheme" content="dark"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Wi‑Fi 備援設定</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#0d131b;--panel:#141b24;--panel2:#19222d;--line:rgba(255,255,255,.07);--line2:rgba(255,255,255,.12);
+:root{color-scheme:dark;--bg:#0d131b;--panel:#141b24;--panel2:#19222d;--line:rgba(255,255,255,.07);--line2:rgba(255,255,255,.12);
 --ink:#e8eef5;--dim:#93a1b2;--faint:#5d6b7c;--teal:#2dd4bf;--sky:#38bdf8;--danger:#f87171;
 --disp:"Sora","Noto Sans TC",sans-serif;--body:"Noto Sans TC","Sora",system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace;}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}

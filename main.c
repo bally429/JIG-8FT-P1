@@ -53,6 +53,7 @@
  *  1. 新增 VR 命令（2 字元版本查詢），供 ESP32 燒錄後比對 FIRMWARE_VERSION。
  *	2. OT 命令新增通電拒絕：g_power_state!=0 或繼電器(PC7)吸合時回 OT_ERR,PWR 不跳轉。
  *	3. 移除開機黑鍵(PF6) OTA 驗證入口，OTA 改由 ESP32 網頁觸發。
+ * V5.5.2 (2026/07/30): 修正 鬧鐘紅色按鈕BUG
  * ===========================================================================================
  */
 
@@ -68,7 +69,7 @@
 // =======================================================
 // [系統版本控制]
 // =======================================================
-#define FIRMWARE_VERSION "V5.5.1"
+#define FIRMWARE_VERSION "V5.5.2"
 
 // =======================================================
 // [系統全域設定與變數]
@@ -951,73 +952,100 @@ void Stopwatch_Loop(void) {
 }
 
 void Alarm_Menu_Loop(void) {
-    int current_idx = 0; int mode = 0; 
+    int current_idx = 0;
+    int mode = 0;   // 0=瀏覽, 1=時, 2=分, 3=秒, 4=ON/OFF   [FIX-C]
     uint8_t last_red=1, last_blue=1, last_green=1, last_yellow=1, last_black=1;
     uint32_t blink_timer = 0; int show_cursor = 1;
 
     while(1) {
-        Global_Background_Tasks(); 
-        if (g_force_alarm_menu && !g_alarm_triggered) g_force_alarm_menu = 0; 
+        Global_Background_Tasks();
+        if (g_force_alarm_menu && !g_alarm_triggered) g_force_alarm_menu = 0;
         blink_timer++; if (blink_timer > 10) { show_cursor = !show_cursor; blink_timer = 0; }
         UI_Clear();
-        
-        int p_idx = (current_idx - 1 + 6) % 6; int n_idx = (current_idx + 1) % 6;
+
+        int p_idx = (current_idx - 1 + 6) % 6;
+        int n_idx = (current_idx + 1) % 6;
         char buf[64];
-        snprintf(buf, sizeof(buf), "  %d. [%02d:%02d:%02d] (%s)", p_idx+1, g_alarms[p_idx].hours, g_alarms[p_idx].minutes, g_alarms[p_idx].seconds, g_alarms[p_idx].enabled?"ON ":"OFF");
-        Safe_Print_OLED_Smooth(0, 0, 63, 0x04,"%s", buf);
+
+        /* [FIX-B] 目前列的 ON/OFF 字串：停在第 4 欄時閃爍 */
+        char en_s[8];
+        if (mode == 4 && !show_cursor) strcpy(en_s, "   ");
+        else strcpy(en_s, g_alarms[current_idx].enabled ? "ON " : "OFF");
+
+        snprintf(buf, sizeof(buf), "  %d. [%02d:%02d:%02d] (%s)", p_idx+1,
+                 g_alarms[p_idx].hours, g_alarms[p_idx].minutes, g_alarms[p_idx].seconds,
+                 g_alarms[p_idx].enabled ? "ON " : "OFF");
+        Safe_Print_OLED_Smooth(0, 0, 63, 0x04, "%s", buf);
 
         if (mode == 0) {
-            snprintf(buf, sizeof(buf), "> %d. [%02d:%02d:%02d] (%s)", current_idx+1, g_alarms[current_idx].hours, g_alarms[current_idx].minutes, g_alarms[current_idx].seconds, g_alarms[current_idx].enabled?"ON ":"OFF");
+            snprintf(buf, sizeof(buf), "> %d. [%02d:%02d:%02d] (%s)", current_idx+1,
+                     g_alarms[current_idx].hours, g_alarms[current_idx].minutes,
+                     g_alarms[current_idx].seconds, en_s);
         } else {
             char h_s[8], m_s[8], s_s[8];
-            if(mode==1 && !show_cursor) strcpy(h_s,"  "); else snprintf(h_s,8,"%02d",g_alarms[current_idx].hours);
-            if(mode==2 && !show_cursor) strcpy(m_s,"  "); else snprintf(m_s,8,"%02d",g_alarms[current_idx].minutes);
-            if(mode==3 && !show_cursor) strcpy(s_s,"  "); else snprintf(s_s,8,"%02d",g_alarms[current_idx].seconds);
-            snprintf(buf, sizeof(buf), "> %d. [%s:%s:%s] (%s)", current_idx+1, h_s, m_s, s_s, g_alarms[current_idx].enabled?"ON ":"OFF");
+            if (mode==1 && !show_cursor) strcpy(h_s,"  "); else snprintf(h_s,8,"%02d",g_alarms[current_idx].hours);
+            if (mode==2 && !show_cursor) strcpy(m_s,"  "); else snprintf(m_s,8,"%02d",g_alarms[current_idx].minutes);
+            if (mode==3 && !show_cursor) strcpy(s_s,"  "); else snprintf(s_s,8,"%02d",g_alarms[current_idx].seconds);
+            snprintf(buf, sizeof(buf), "> %d. [%s:%s:%s] (%s)", current_idx+1, h_s, m_s, s_s, en_s);
         }
-        Safe_Print_OLED_Smooth(16, 0, 63, 0x0F,"%s", buf);
-        snprintf(buf, sizeof(buf), "  %d. [%02d:%02d:%02d] (%s)", n_idx+1, g_alarms[n_idx].hours, g_alarms[n_idx].minutes, g_alarms[n_idx].seconds, g_alarms[n_idx].enabled?"ON ":"OFF");
-        Safe_Print_OLED_Smooth(32, 0, 63, 0x04,"%s", buf);
-        Safe_Print_OLED_Smooth(48, 0, 63, 0x08, " Blk:Save R:Set Y:Back");
+        Safe_Print_OLED_Smooth(16, 0, 63, 0x0F, "%s", buf);
+
+        snprintf(buf, sizeof(buf), "  %d. [%02d:%02d:%02d] (%s)", n_idx+1,
+                 g_alarms[n_idx].hours, g_alarms[n_idx].minutes, g_alarms[n_idx].seconds,
+                 g_alarms[n_idx].enabled ? "ON " : "OFF");
+        Safe_Print_OLED_Smooth(32, 0, 63, 0x04, "%s", buf);
+
+        /* [FIX-C] 提示列依 mode 變化，明示 G/B 在 ON/OFF 欄的作用 */
+        if (mode == 0)      Safe_Print_OLED_Smooth(48, 0, 63, 0x08, "Blk:Save R:Set Y:Back");
+        else if (mode == 4) Safe_Print_OLED_Smooth(48, 0, 63, 0x08, "G:ON B:OFF R:OK Y:Esc");
+        else                Safe_Print_OLED_Smooth(48, 0, 63, 0x08, "G:+ B:- R:Next Y:Esc");
         UI_Update();
 
-        uint8_t red=(PF->PIN&BIT14)?1:0, blue=(PF->PIN&BIT3)?1:0, green=(PF->PIN&BIT4)?1:0, yellow=(PF->PIN&BIT5)?1:0, black=(PF->PIN&BIT6)?1:0;
-        if (mode == 0) {
-            if (red==0 && last_red==1) { JigBeep(50); mode=1; show_cursor=1; blink_timer=0; }
-            if (blue==0 && last_blue==1) { JigBeep(50); current_idx = (current_idx + 1) % 6; }
-            if (green==0 && last_green==1) { JigBeep(50); current_idx = (current_idx - 1 + 6) % 6; }
-            if (black==0 && last_black==1) { 
-                JigBeep(100); 
+        /* [FIX-A] 紅按鈕改回實體 PA8（原誤植 PF14＝白按鈕） */
+        uint8_t red   = (PA->PIN & BIT8) ? 1 : 0;
+        uint8_t blue  = (PF->PIN & BIT3) ? 1 : 0;
+        uint8_t green = (PF->PIN & BIT4) ? 1 : 0;
+        uint8_t yellow= (PF->PIN & BIT5) ? 1 : 0;
+        uint8_t black = (PF->PIN & BIT6) ? 1 : 0;
 
+        if (mode == 0) {
+            if (red==0   && last_red==1)   { JigBeep(50);  mode=1; show_cursor=1; blink_timer=0; }
+            if (blue==0  && last_blue==1)  { JigBeep(50);  current_idx = (current_idx + 1) % 6; }
+            if (green==0 && last_green==1) { JigBeep(50);  current_idx = (current_idx - 1 + 6) % 6; }
+            if (black==0 && last_black==1) {
+                JigBeep(100);
                 UI_Clear();
                 Safe_Print_OLED_Smooth(24, 0, 63, 0x0F, "   Saving to SD Card...");
                 UI_Update();
-
-                for(int i = 0; i < 6; i++) {
+                for (int i = 0; i < 6; i++) {
                     char tx_buf[32];
-                    snprintf(tx_buf, sizeof(tx_buf), "%d,%02d,%02d,%02d,%d", 
-                             i, g_alarms[i].hours, g_alarms[i].minutes, g_alarms[i].seconds, g_alarms[i].enabled);
-                    JIG_8CP_Send_Packet("AS", tx_buf); 
-                    Delay_ms(80); 
+                    snprintf(tx_buf, sizeof(tx_buf), "%d,%02d,%02d,%02d,%d",
+                             i, g_alarms[i].hours, g_alarms[i].minutes,
+                             g_alarms[i].seconds, g_alarms[i].enabled);
+                    JIG_8CP_Send_Packet("AS", tx_buf);
+                    Delay_ms(80);
                 }
-                break; 
+                break;
             }
-            if (yellow==0 && last_yellow==1) { JigBeep(100); break; } 
-        } else { 
-            if (red==0 && last_red==1) { JigBeep(50); mode++; if (mode>3) mode=0; show_cursor=1; blink_timer=0; }
+            if (yellow==0 && last_yellow==1) { JigBeep(100); break; }
+        } else {
+            /* [FIX-C] 編輯欄上限 3 → 4，將 ON/OFF 納入 */
+            if (red==0 && last_red==1) { JigBeep(50); mode++; if (mode > 4) mode = 0; show_cursor=1; blink_timer=0; }
             if (green==0 && last_green==1) {
                 JigBeep(30); show_cursor=1; blink_timer=0;
-                if (mode==1) g_alarms[current_idx].hours = (g_alarms[current_idx].hours + 1) % 24;
+                if (mode==1) g_alarms[current_idx].hours   = (g_alarms[current_idx].hours + 1) % 24;
                 if (mode==2) g_alarms[current_idx].minutes = (g_alarms[current_idx].minutes + 1) % 60;
                 if (mode==3) g_alarms[current_idx].seconds = (g_alarms[current_idx].seconds + 1) % 60;
+                if (mode==4) g_alarms[current_idx].enabled = 1;        /* [FIX-C] ON  */
             }
             if (blue==0 && last_blue==1) {
                 JigBeep(30); show_cursor=1; blink_timer=0;
-                if (mode==1) g_alarms[current_idx].hours = (g_alarms[current_idx].hours==0) ? 23 : g_alarms[current_idx].hours - 1;
-                if (mode==2) g_alarms[current_idx].minutes = (g_alarms[current_idx].minutes==0) ? 59 : g_alarms[current_idx].minutes - 1;
-                if (mode==3) g_alarms[current_idx].seconds = (g_alarms[current_idx].seconds==0) ? 59 : g_alarms[current_idx].seconds - 1;
+                if (mode==1) g_alarms[current_idx].hours   = (g_alarms[current_idx].hours   == 0) ? 23 : g_alarms[current_idx].hours   - 1;
+                if (mode==2) g_alarms[current_idx].minutes = (g_alarms[current_idx].minutes == 0) ? 59 : g_alarms[current_idx].minutes - 1;
+                if (mode==3) g_alarms[current_idx].seconds = (g_alarms[current_idx].seconds == 0) ? 59 : g_alarms[current_idx].seconds - 1;
+                if (mode==4) g_alarms[current_idx].enabled = 0;        /* [FIX-C] OFF */
             }
-            if (yellow==0 && last_yellow==1) { JigBeep(100); mode=0; } 
+            if (yellow==0 && last_yellow==1) { JigBeep(100); mode=0; }
         }
         last_red=red; last_blue=blue; last_green=green; last_yellow=yellow; last_black=black;
         Delay_ms(15);
